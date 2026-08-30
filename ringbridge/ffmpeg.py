@@ -137,15 +137,31 @@ class FrameToVideo:
             #   medium    0,7 s  High                  118 KB
             # ultrafast ist also auch noch dreimal so gross bei zwei
             # Zehntelsekunden Vorsprung.
+            #
+            # Diese Zeiten taugen NICHT zum Vergleich der Presets
+            # untereinander - der Encode ist so kurz, dass Threadstart
+            # und Rauschen dominieren, weshalb medium scheinbar vor
+            # veryfast liegt. Wo er laenger laeuft, zeigt sich der echte
+            # Abstand: blinkbridge misst bei 1440p/2,0 s medium 4,76 s
+            # gegen veryfast 2,11 s. Die Aussage oben betrifft Profil und
+            # Dateigroesse, nicht die Geschwindigkeit.
             *(['-preset', CONFIG.get('still_video_preset') or 'veryfast']
               if params_video['codec_name'] in ('h264', 'hevc') else []),
             '-pix_fmt', params_video['pix_fmt'],
             '-t', str(output_duration),
             '-vf', f"scale={params_video['width']}:{params_video['height']},fps={fps_value}",
             # ringbridge: CRF statt der Bitrate des Clips. Ein Standbild
-            # braucht die Datenrate eines Bewegtbilds nicht - und mit
-            # fester Bitrate presst der Encoder sie in immer weniger
-            # Bilder, sodass die Datei bei sinkender Bildrate WAECHST.
+            # braucht die Datenrate eines Bewegtbilds nicht.
+            #
+            # Zum Nebeneffekt der festen Bitrate: Wird die Bildzahl
+            # gesenkt, KANN die Datei wachsen, weil dasselbe Budget pro
+            # Sekunde auf weniger Bilder verteilt wird. Das gilt aber nur,
+            # wenn die Ratenkontrolle bindet. Bei einem stehenden Bild
+            # liegt der Inhalt oft weit unter dem Budget - dann passiert
+            # nichts dergleichen. Gegenmessung von der blinkbridge-Seite
+            # (1440p, Quelle 2722 kbit/s): 2,0 s -> 285 KB, 0,5 s ->
+            # 156 KB, also kleiner statt groesser. Bei uns hat die
+            # Ratenkontrolle gebunden, dort nicht.
             # Gemessen (1440p HEVC, 2 s @ 5 fps): mit -b:v 5,7 s / 414 KB,
             # mit -crf 30 4,7 s / 213 KB. Schneller UND kleiner.
             # None/0 = Bitrate des Clips (Verhalten des Originals).
