@@ -51,7 +51,8 @@ def export(stream_names) -> None:
     host = cfg.get('rtsp_host') or CONFIG['rtsp_server']['address']
     port = cfg.get('rtsp_port') or CONFIG['rtsp_server']['port']
     roles = cfg.get('roles') or DEFAULT_ROLES
-    fps = (cfg.get('detect_defaults') or {}).get('fps', DEFAULT_DETECT_FPS)
+    defaults = cfg.get('detect_defaults') or {}
+    fps = defaults.get('fps', DEFAULT_DETECT_FPS)
 
     go2rtc, cameras = [], []
 
@@ -70,14 +71,24 @@ def export(stream_names) -> None:
                  "    detect:",
                  f"      fps: {fps}"]
 
-        # Nur schreiben, was wir wirklich wissen. Ein geratener Wert ist
-        # schlechter als keiner: fehlt width/height, liest Frigate sie
-        # selbst aus dem Stream.
+        # Reihenfolge der Wahrheit: gemessen schlaegt konfiguriert schlaegt
+        # weglassen. Der gemessene Wert stammt aus dem tatsaechlich
+        # gelieferten Clip - genau dadurch faellt auf, wenn in der
+        # Frigate-Config etwas anderes steht. Laesst er sich nicht
+        # ermitteln, greift detect_defaults; fehlt auch das, bleiben die
+        # Zeilen weg und Frigate liest die Werte selbst. Geraten wird nie.
+        if not (w and h):
+            w, h = defaults.get('width'), defaults.get('height')
+            if w and h:
+                log.debug(f"{name}: Aufloesung nicht messbar, "
+                          f"detect_defaults verwendet")
+
         if w and h:
             block += [f"      width: {w}", f"      height: {h}"]
         else:
-            block += ["      # width/height weggelassen - Frigate liest sie",
-                      "      # selbst aus dem Stream"]
+            block += ["      # width/height weggelassen - nicht messbar und",
+                      "      # kein detect_defaults gesetzt; Frigate liest",
+                      "      # sie selbst aus dem Stream"]
 
         cameras.append("\n".join(block))
 
