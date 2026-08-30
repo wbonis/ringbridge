@@ -113,9 +113,15 @@ class FrameToVideo:
             'ffmpeg',
             *COMMON_FFMPEG_ARGS,
             '-loop', '1',
-            '-i', image_file_name,   
-            '-f', 'lavfi',
-            '-i', f"anullsrc=channel_layout={params_audio['channels']}:sample_rate={params_audio['sample_rate']}",
+            '-i', image_file_name,
+            # ringbridge: Tonspur nur, wenn der Clip eine hat. Das Original
+            # setzt sie voraus (params_audio['channels']/['sample_rate']) und
+            # scheitert sonst mit KeyError bzw. AssertionError - die Kamera
+            # faellt dann stumm aus, weil das Standbild 0 Byte gross bleibt.
+            *(['-f', 'lavfi',
+               '-i', f"anullsrc=channel_layout={params_audio['channels']}"
+                     f":sample_rate={params_audio['sample_rate']}"]
+              if params_audio else []),
             '-c:v', params_video['codec_name'],
             # ringbridge: Es wird ein STANDBILD encodiert - Lookahead,
             # B-Frames und Bewegungssuche sind hier sinnlos. Ohne preset
@@ -146,13 +152,15 @@ class FrameToVideo:
             # "constrained baseline". Deshalb normalisieren; ist der Name
             # unbekannt, lassen wir die Option lieber weg als zu scheitern.
             *_profile_args(params_video.get('profile')),
-            '-level:v', params_video['level'],
+            *(['-level:v', str(params_video['level'])]
+              if params_video.get('level') not in (None, '', -99) else []),
             '-movflags', 'faststart',
             '-video_track_timescale', time_base_denominator,
             '-fps_mode', 'passthrough',
-            '-c:a', 'aac',
-            '-ar', params_audio['sample_rate'],
-            '-ac', params_audio['channels'],
+            *(['-c:a', 'aac',
+               '-ar', params_audio['sample_rate'],
+               '-ac', params_audio['channels']]
+              if params_audio else ['-an']),
             file_name_output_video
         ]    
 
@@ -170,9 +178,21 @@ class StillVideoCreator:
                  file_name_input_video: Union[str, Path], 
                  output_duration: float=1, 
                  file_name_still_video: Union[str, Path]="output.mp4"):
-        self.thread = threading.Thread(target=self._run, 
-                                       args=(file_name_input_video, output_duration, file_name_still_video))
-        self.thread.start() 
+        # ringbridge: Ausnahmen im Thread gingen verloren - wait() kehrte
+        # normal zurueck, und der Aufrufer hielt ein 0-Byte-Standbild fuer
+        # gelungen. Genau diese stille Art hat heute zweimal Zeit gekostet
+        # (HEVC-Codec, Profilname). Jetzt wird sie in wait() erneut geworfen.
+        self._error = None
+        self.thread = threading.Thread(
+            target=self._run_guarded,
+            args=(file_name_input_video, output_duration, file_name_still_video))
+        self.thread.start()
+
+    def _run_guarded(self, *args) -> None:
+        try:
+            self._run(*args)
+        except Exception as e:
+            self._error = e
 
     def _run(self, 
              file_name_input_video: Union[str, Path], 
@@ -188,7 +208,12 @@ class StillVideoCreator:
         params_audio, params_video = StreamParameters(file_name_input_video).wait()
         lfg.wait()
 
-        assert all((params_audio, params_video))
+        if not params_video:
+            raise RuntimeError(
+                f"kein Videostream in {file_name_input_video} gefunden")
+        if not params_audio:
+            log.info(f"{Path(file_name_input_video).name}: keine Tonspur - "
+                     f"Standbild wird ohne Ton erzeugt")
 
         # convert to video
         FrameToVideo(still_image_file_name, params_video, params_audio,
@@ -200,4 +225,6 @@ class StillVideoCreator:
         
     def wait(self) -> None:
         self.thread.join()
+        if self._error is not None:
+            raise self._error
     
