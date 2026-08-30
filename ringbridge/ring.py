@@ -69,7 +69,10 @@ DEFAULT_MAX_CLIP_SECONDS = 180
 # Bilder. Nach H.264 umcodiert stammen beide aus derselben Familie und das
 # Problem verschwindet (blink2 laeuft mit 2560x1440 H.264 fehlerfrei).
 # Nebeneffekt: das Standbild ist danach in 0,3 s statt 4,7 s erzeugt.
-TRANSCODE_PRESET = 'ultrafast'
+# Nicht 'ultrafast': x264 erzwingt damit "Constrained Baseline" und
+# ignoriert -profile:v. Der umcodierte Clip haette dann ein anderes Profil
+# als alles andere - siehe Kommentar in ffmpeg.py.
+TRANSCODE_PRESET = 'veryfast'
 
 # Push-Kanal (FCM). Nach einem Push wird fuer diese Dauer bei jedem
 # Schleifendurchlauf nach der fertigen Aufnahme gefragt - Ring braucht

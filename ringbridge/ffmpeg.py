@@ -124,13 +124,20 @@ class FrameToVideo:
               if params_audio else []),
             '-c:v', params_video['codec_name'],
             # ringbridge: Es wird ein STANDBILD encodiert - Lookahead,
-            # B-Frames und Bewegungssuche sind hier sinnlos. Ohne preset
-            # brauchte x265 fuer ein 2-s-Standbild in 2560x1440 ueber
-            # 16 s Volllast; waehrenddessen kam der Publisher derselben
-            # Kamera nicht mehr rechtzeitig zum Senden und MediaMTX
-            # meldete "payload is too short". Qualitaet ist bei einem
-            # stehenden Bild zweitrangig.
-            *(['-preset', 'ultrafast']
+            # B-Frames und Bewegungssuche sind hier sinnlos, ein schnelles
+            # preset also richtig. NICHT 'ultrafast': x264 erzwingt damit
+            # "Constrained Baseline" und ignoriert ein angegebenes
+            # -profile:v. Da Clip und Standbild im selben -c copy-Concat
+            # landen, weichen dann die profile-level-id im SDP-fmtp
+            # voneinander ab - dieselbe Fehlerklasse wie ein Auflösungs-
+            # oder Tonformat-Konflikt, nur an einem Parameter, auf den
+            # niemand schaut. Gemessen (1080p, 2 s Standbild):
+            #   ultrafast 0,5 s  Constrained Baseline  394 KB
+            #   veryfast  0,9 s  High                  117 KB
+            #   medium    0,7 s  High                  118 KB
+            # ultrafast ist also auch noch dreimal so gross bei zwei
+            # Zehntelsekunden Vorsprung.
+            *(['-preset', CONFIG.get('still_video_preset') or 'veryfast']
               if params_video['codec_name'] in ('h264', 'hevc') else []),
             '-pix_fmt', params_video['pix_fmt'],
             '-t', str(output_duration),

@@ -2,6 +2,7 @@
   "still_video_duration": 2.0,
   "still_video_fps": 5,
   "still_video_crf": 30,
+  "still_video_preset": "veryfast",
   "paths": {
     "videos": "/working",
     "concat": "/working",
