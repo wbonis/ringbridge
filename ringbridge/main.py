@@ -9,6 +9,7 @@ from rich.highlighter import NullHighlighter, JSONHighlighter
 from ringbridge.stream_server import StreamServer
 from ringbridge.ring import CameraManager
 from ringbridge.config import *
+from ringbridge.frigate_export import export as export_frigate_snippet
 
 
 log = logging.getLogger(__name__)
@@ -76,6 +77,14 @@ class Application:
                 continue
             ss.failure_count = 0
             ss.datetime_started = datetime.now()
+
+        # ringbridge: Frigate-Schnipsel schreiben, sobald die Streams stehen -
+        # dann sind die Clips da und die Aufloesungen bekannt.
+        try:
+            export_frigate_snippet(
+                [ss.stream_name_sanitized for ss in self.stream_servers.values()])
+        except Exception as e:
+            log.warning(f"Frigate-Schnipsel nicht erzeugt: {e}")
 
         log.info(f"monitoring cameras for motion")
         while self.running:

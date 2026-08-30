@@ -55,5 +55,18 @@
     "url": "http://FRIGATE_HOST_HERE:5000",
     "match_window_seconds": 90,
     "set_sub_label": false
+  },
+  "frigate_export": {
+    "enabled": true,
+    "output_path": "/working/frigate-cameras.yml",
+    "rtsp_host": "RINGBRIDGE_HOST_HERE",
+    "rtsp_port": 8555,
+    "roles": [
+      "detect",
+      "record"
+    ],
+    "detect_defaults": {
+      "fps": 5
+    }
   }
 }
