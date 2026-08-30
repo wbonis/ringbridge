@@ -6,19 +6,6 @@ ringbridge ist eine **Portierung von
 [roger-/blinkbridge](https://github.com/roger-/blinkbridge)** auf Ring.
 Gleiche Idee, andere Cloud.
 
-Der Anteil ist erheblich, nicht bloß Inspiration:
-`main.py`, `ffmpeg.py`, `utils.py`, `stream_server.py` und `config.py`
-stammen aus blinkbridge und sind nur punktuell angepasst — `main.py` etwa
-weicht in 24 von 174 Zeilen ab. Neu geschrieben sind `ring.py` (ersetzt
-`blink.py`), `mqtt.py` und `frigate.py`.
-
-⚠️ **blinkbridge führt keine Lizenzdatei und deklariert auf GitHub keine
-Lizenz.** Damit ist die Weiterverwendung des übernommenen Codes
-urheberrechtlich nicht geregelt. Dieses Repository enthält deshalb
-bewusst **keine** eigene Lizenzdatei für den abgeleiteten Teil — eine
-solche zu vergeben stünde uns nicht zu. Wer den Code weiterverwenden
-will, klärt das bitte mit dem Urheber von blinkbridge.
-
 ## Warum das Ganze
 
 Frigate braucht einen **durchgehenden** Stream. Ring liefert keinen — und
@@ -69,7 +56,7 @@ der jeweiligen Codestelle.
 Zugangsdaten in `config/config.json` eintragen, dann **interaktiv**
 starten — die 2FA-Abfrage ist ein blockierender stdin-Prompt:
 
-    cd /opt/stacks/ringbridge
+    cd ringbridge
     docker compose run --rm ringbridge
 
 Nach erfolgreicher Anmeldung liegt das Token in `config/.ring_token.json`
