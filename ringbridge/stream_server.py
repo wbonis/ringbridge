@@ -147,9 +147,12 @@ class StreamServer:
         Hier ist der Aufraeumpunkt sicher: der Publisher fuer diese Kamera
         laeuft noch nicht, es liest also niemand auf den Dateien.
         """
-        pattern = f"{self.stream_name_sanitized}_still_*.mp4"
+        # Auch die .jpg-Zwischendateien: die entstehen beim Erzeugen des
+        # Standbilds und bleiben liegen, wenn das Encodieren scheitert.
+        patterns = (f"{self.stream_name_sanitized}_still_*.mp4",
+                    f"{self.stream_name_sanitized}_still_*.jpg")
         removed = 0
-        for old_still in PATH_VIDEOS.glob(pattern):
+        for old_still in (f for pat in patterns for f in PATH_VIDEOS.glob(pat)):
             try:
                 old_still.unlink()
                 removed += 1

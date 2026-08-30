@@ -215,13 +215,17 @@ class StillVideoCreator:
             log.info(f"{Path(file_name_input_video).name}: keine Tonspur - "
                      f"Standbild wird ohne Ton erzeugt")
 
-        # convert to video
-        FrameToVideo(still_image_file_name, params_video, params_audio,
-                    output_duration=output_duration,
-                    file_name_output_video=file_name_still_video).wait()
-        
-        # remove temporary file
-        still_image_file_name.unlink()
+        # ringbridge: try/finally - die Zwischendatei wurde nur im
+        # Erfolgsfall geloescht. Scheitert das Encodieren, blieb sie liegen
+        # (am 2026-08-30 mehrfach beobachtet, je 170 KB, nach den
+        # HEVC- und Profilnamen-Fehlschlaegen). missing_ok, weil der
+        # Fehler auch vor dem Erzeugen aufgetreten sein kann.
+        try:
+            FrameToVideo(still_image_file_name, params_video, params_audio,
+                         output_duration=output_duration,
+                         file_name_output_video=file_name_still_video).wait()
+        finally:
+            still_image_file_name.unlink(missing_ok=True)
         
     def wait(self) -> None:
         self.thread.join()
