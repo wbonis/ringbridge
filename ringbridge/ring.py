@@ -539,6 +539,35 @@ class CameraManager:
     def get_cameras(self):
         return [d.name for d in self.ring.video_devices()]
 
+    def _fallback_clip(self, camera_name: str, reason: str) -> Union[Path, None]:
+        """
+        Auf den zuletzt geladenen Clip zurueckfallen.
+
+        Ohne das wird die Kamera uebersprungen und existiert in Frigate
+        gar nicht - nur eine Warnung im Log, sonst kein Hinweis. Zwei
+        Ausloeser dafuer sind Normalbetrieb, keine Stoerung:
+
+        - Der Ereignisfilter. Sind die letzten `HISTORY_LIMIT` Ereignisse
+          alle `on_demand` (also eigene Live-View-Sitzungen) oder laenger
+          als `max_clip_seconds`, bleibt nichts uebrig.
+        - Ein haengender Ring-API-Aufruf beim Containerstart.
+
+        Mit dem alten Clip bleibt die Kamera sichtbar und zeigt das
+        zuletzt bekannte Bild, bis wieder eine Aufnahme durchkommt.
+        Bewusst kein schwarzes Platzhalterbild: Frigate wuerde den
+        Wechsel darauf als Bewegung werten und Ereignisse auf schwarzem
+        Grund erzeugen.
+        """
+        file_name = self._clip_path(camera_name)
+        if file_name.exists() and file_name.stat().st_size > 0:
+            log.warning(f"{camera_name}: {reason} - verwende den zuletzt "
+                        f"geladenen Clip weiter")
+            return file_name
+
+        log.warning(f"{camera_name}: {reason}, und es liegt kein frueherer "
+                    f"Clip vor - Kamera bleibt vorerst ohne Stream")
+        return None
+
     async def save_latest_clip(self, camera_name: str, force: bool = False) -> Union[Path, None]:
         """Letzte vorhandene Cloud-Aufnahme laden (Startbild fuer den Stream)."""
         file_name = self._clip_path(camera_name)
@@ -549,16 +578,18 @@ class CameraManager:
 
         dev = self._device(camera_name)
         if dev is None:
-            return None
+            return self._fallback_clip(camera_name, "Kamera nicht in der Ring-Liste")
 
         recording_id = await self._last_ready_recording_id(dev)
         if recording_id is None:
-            log.warning(f"{camera_name}: keine Cloud-Aufnahme vorhanden "
-                        f"(Ring-Protect-Abo aktiv?)")
-            return None
+            return self._fallback_clip(
+                camera_name,
+                "keine passende Cloud-Aufnahme gefunden (Ring-Protect aktiv? "
+                "Ereignisfilter?)")
 
         if not await self._download(dev, recording_id, file_name):
-            return None
+            return self._fallback_clip(
+                camera_name, f"Aufnahme {recording_id} nicht ladbar")
 
         # Ausgangspunkt merken, sonst gilt diese Aufnahme sofort als "neu".
         self.camera_last_record[camera_name] = recording_id
