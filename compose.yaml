@@ -1,0 +1,35 @@
+services:
+  ringbridge:
+    # build statt nur image: sonst laeuft "docker compose restart" auf dem
+    # alten Image weiter, obwohl neu gebaut wurde. Mit build+image baut
+    # "up -d --build" und ersetzt den Container in einem Schritt.
+    build: .
+    image: ringbridge:local
+    container_name: ringbridge
+    restart: unless-stopped
+    depends_on:
+      - mediamtx
+    volumes:
+      - ./config:/config
+      - /tmp/ringbridge:/working
+    tty: true # for color logs
+    environment:
+      - RINGBRIDGE_CONFIG=/config/config.json
+
+  # Eigene MediaMTX-Instanz. Bewusst NICHT die aus /opt/stacks/blinkbridge
+  # mitbenutzen: sonst reisst ein "compose down" im Blink-Stack auch alle
+  # Ring-Streams weg. Jeder Stack steht fuer sich.
+  mediamtx:
+    image: bluenviron/mediamtx
+    container_name: mediamtx-ring   # global eindeutig; im eigenen Netz
+                                    # bleibt der DNS-Name "mediamtx"
+    restart: unless-stopped
+    environment:
+      # 8555 statt 8554 - der Blink-Stack hat 8554. Intern und extern
+      # derselbe Port, damit RTSP keine abweichenden Ports meldet.
+      - MTX_RTSPADDRESS=:8555
+      # erzwingt TCP fuer Publisher UND Leser. Per UDP zerreissen die
+      # I-Frames hochaufloesender Kameras ("invalid FU-A packet").
+      - MTX_RTSPTRANSPORTS=tcp
+    ports:
+      - 8555:8555

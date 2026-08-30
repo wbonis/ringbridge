@@ -1,0 +1,7 @@
+config/.cred.json
+config/.ring_token.json
+config/config.json
+__pycache__/
+*.pyc
+config/.ring_push.json
+*.bak-*

@@ -1,0 +1,59 @@
+{
+  "still_video_duration": 2.0,
+  "still_video_fps": 5,
+  "still_video_crf": 30,
+  "paths": {
+    "videos": "/working",
+    "concat": "/working",
+    "config": "/config"
+  },
+  "cameras": {
+    "enabled": [],
+    "disabled": [],
+    "max_failures": 100,
+    "restart_delay_seconds": 30
+  },
+  "ring": {
+    "login": {
+      "username": "EMAIL_ADDRESS_HERE",
+      "password": "PASSWORD_HERE"
+    },
+    "poll_interval": 5,
+    "event_kinds": [
+      "motion",
+      "ding"
+    ],
+    "max_clip_seconds": 180,
+    "idle_poll_seconds": 30,
+    "camera_names": {},
+    "transcode": {
+      "Ring-Kameraname": {
+        "codec": "libx264",
+        "width": 1280,
+        "height": 720
+      }
+    }
+  },
+  "rtsp_server": {
+    "address": "mediamtx",
+    "port": 8555
+  },
+  "log_level": "INFO",
+  "mqtt": {
+    "enabled": true,
+    "host": "MQTT_HOST_HERE",
+    "port": 1883,
+    "username": "MQTT_USER_HERE",
+    "password": "MQTT_PASSWORD_HERE",
+    "topic_prefix": "ringbridge",
+    "client_id": "ringbridge",
+    "discovery": true,
+    "discovery_prefix": "homeassistant"
+  },
+  "frigate": {
+    "enabled": false,
+    "url": "http://FRIGATE_HOST_HERE:5000",
+    "match_window_seconds": 90,
+    "set_sub_label": false
+  }
+}
