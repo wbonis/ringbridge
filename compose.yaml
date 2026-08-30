@@ -11,15 +11,21 @@ services:
       - mediamtx
     volumes:
       - ./config:/config
-      # RAM-backed tmpfs for temporary files (video clips, concat files, stills).
-      # 256MB is sufficient for 25 cameras at maximum workload (~190MB peak).
-      # Increase if you see ENOSPC errors in the logs.
-      - type: tmpfs
-        target: /working
-        tmpfs:
-          size: 268435456  # 256MB
-      # Bind-mount alternative (disk-backed, slower but survives restarts):
-      # - /tmp/blinkbridge:/working
+      # Arbeitsverzeichnis (Clips, Standbilder, Concat-Dateien).
+      #
+      # Bewusst ein Bind auf /tmp und KEIN tmpfs im Container: /tmp ist auf
+      # diesem Host bereits ein tmpfs (1,9 GB), der Inhalt liegt also
+      # ohnehin im RAM. Ein Container-tmpfs wuerde daran nichts aendern,
+      # aber bei jedem "up -d" geleert - und damit verlaere
+      # _fallback_clip() seine Grundlage: nach einem Neustart gaebe es
+      # keinen frueheren Clip mehr, auf den es zurueckgreifen koennte.
+      # Das Host-/tmp ueberlebt Container-Neustarts und wird erst beim
+      # Reboot geleert.
+      #
+      # Wer eine harte Obergrenze will, legt sie besser als eigenes tmpfs
+      # auf dem HOST unter /tmp/ringbridge an - dann gilt das Limit und
+      # der Rueckfall bleibt erhalten.
+      - /tmp/ringbridge:/working
     tty: true # for color logs
     environment:
       - RINGBRIDGE_CONFIG=/config/config.json
