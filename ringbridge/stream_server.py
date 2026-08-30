@@ -129,8 +129,39 @@ class StreamServer:
             log.info(f"{self.stream_name}: stopping server")
             self.process.kill()
 
+    def _sweep_old_stills(self) -> None:
+        """
+        Verwaiste Standbilder dieser Kamera entfernen.
+
+        `add_video()` loescht das vorige Standbild nur, wenn
+        `current_still_video` gesetzt ist UND `still_only` False ist.
+        `start_server()` ruft es aber immer mit `still_only=True` auf, und
+        auf einem frischen StreamServer ist `current_still_video` ohnehin
+        None. Jeder Container- und jeder Stream-Neustart hinterliess damit
+        ein Standbild, das nie wieder angefasst wurde: am 2026-08-30 waren
+        es 103 Dateien mit 48 MB an einem Tag.
+
+        Auf Platte faellt das kaum auf, in einem tmpfs fuehrt es zu ENOSPC
+        mitten im Betrieb.
+
+        Hier ist der Aufraeumpunkt sicher: der Publisher fuer diese Kamera
+        laeuft noch nicht, es liest also niemand auf den Dateien.
+        """
+        pattern = f"{self.stream_name_sanitized}_still_*.mp4"
+        removed = 0
+        for old_still in PATH_VIDEOS.glob(pattern):
+            try:
+                old_still.unlink()
+                removed += 1
+            except OSError as e:
+                log.debug(f"{self.stream_name}: {old_still.name} nicht loeschbar: {e}")
+
+        if removed:
+            log.info(f"{self.stream_name}: {removed} verwaiste Standbild-Datei(en) entfernt")
+
     def start_server(self, file_name_initial_video: Union[str, Path]) -> None:
         log.debug(f"{self.stream_name}: starting server with {file_name_initial_video}")
+        self._sweep_old_stills()
         self._make_concat_files()
         self.add_video(file_name_initial_video, still_only=True)
         url = self._run_server()
