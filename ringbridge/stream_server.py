@@ -1,6 +1,7 @@
 import os
 import subprocess
 import threading
+import time
 import unicodedata
 import re
 import logging
@@ -23,6 +24,12 @@ log = logging.getLogger(__name__)
 # and for a still built from that clip (343/12 vs 200/7 for the same rate) -
 # comparing it produced a false positive within four minutes on the sibling
 # project. Compare only what the SDP carries.
+# A frozen publisher is restarted at most this often per camera. The
+# detection itself already takes 210+ s, so this is a second fence, not the
+# primary pacing - it exists so a pathological loop is bounded and visible
+# (every restart logs 'server failed', which the monitor alarms on).
+AUTO_RESTART_MIN_INTERVAL = 600
+
 SDP_FIELDS = ('width', 'height', 'profile', 'level',
               'sample_rate', 'channels')
 
@@ -62,6 +69,11 @@ class StreamServer:
     # restart, since that builds a fresh StreamServer.
     _published_shape = None
     _warned_shape = None
+
+    # Class-level on purpose: a restart builds a fresh StreamServer, so an
+    # instance attribute would forget the last restart exactly when the
+    # rate limit matters.
+    _last_auto_restart = {}
 
     def _run_server(self) -> str:
         output_url = f"{RTSP_URL}/{self.stream_name_sanitized}"
@@ -287,6 +299,48 @@ class StreamServer:
             except Exception as e:
                 log.warning(f"{self.stream_name}: publisher never reached the "
                             f"clip within {limit}s ({e}) - still not swapped in")
+
+                # Not taking a single segment boundary for 210+ s is
+                # impossible in healthy playback of any clip shorter than
+                # the bound - measured 2026-08-31: the publisher was asleep
+                # inside -re pacing (hrtimer_nanosleep, empty send queue,
+                # ESTABLISHED socket), a state no process or socket watchdog
+                # can see, and it held for ten minutes until a manual
+                # SIGTERM. This warning is therefore a freeze detector, and
+                # the cure is a stream restart: terminate the publisher and
+                # let the existing watchdog rebuild it (measured: 9 s).
+                #
+                # Guard 1: only if OUR publisher is still alive. This thread
+                # can outlive a watchdog restart, and then self.process is
+                # the dead old one - terminating nothing. It can never hit
+                # the replacement, because it only ever touches the process
+                # object it captured.
+                # Guard 2: rate-limited per camera, class-level, so a
+                # pathological loop is bounded (and visible: every restart
+                # logs 'server failed', which the monitor alarms on).
+                if self.process is None or self.process.poll() is not None:
+                    log.debug(f"{self.stream_name}: publisher already gone - "
+                              f"stale deferred thread, nothing to restart")
+                    return
+
+                now = time.time()
+                last = StreamServer._last_auto_restart.get(self.stream_name, 0)
+                if now - last < AUTO_RESTART_MIN_INTERVAL:
+                    log.warning(f"{self.stream_name}: publisher looks frozen "
+                                f"again but was auto-restarted "
+                                f"{now - last:.0f}s ago - leaving it alone "
+                                f"(rate limit {AUTO_RESTART_MIN_INTERVAL}s)")
+                    return
+
+                StreamServer._last_auto_restart[self.stream_name] = now
+                log.warning(f"{self.stream_name}: publisher frozen - "
+                            f"terminating it so the watchdog rebuilds the "
+                            f"stream")
+                try:
+                    self.process.terminate()
+                except Exception as e2:
+                    log.error(f"{self.stream_name}: could not terminate the "
+                              f"frozen publisher ({e2})")
                 return
 
             if self._queued_clip != clip:
