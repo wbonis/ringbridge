@@ -1,0 +1,126 @@
+{
+  "_help": [
+    "Every setting ringbridge reads, at its default value. This file is",
+    "documentation - config.json.example is the one to start from.",
+    "",
+    "JSON has no comments, so the explanations live in '_help' fields. The",
+    "code only ever reads keys by name, so these are ignored at runtime and",
+    "you can leave them in or strip them out.",
+    "",
+    "REQUIRED means ringbridge will not start without the key. Everything",
+    "else may be omitted and falls back to the default shown here.",
+    "",
+    "Config is read once at startup. After editing:",
+    "  cd /opt/stacks/ringbridge && docker compose up -d --force-recreate ringbridge"
+  ],
+
+  "log_level": "INFO",
+
+  "paths": {
+    "_help": "REQUIRED, all three. Inside the container. 'videos' holds clips, stills and snapshots; 'concat' the ffmpeg playlists; 'config' this file and the Ring token. Defaults match the bundled compose file - change the host side of the volume mount instead.",
+    "videos": "/working",
+    "concat": "/working",
+    "config": "/config"
+  },
+
+  "rtsp_server": {
+    "_help": "REQUIRED. Where ringbridge PUBLISHES to (the MediaMTX in the same compose project), not where Frigate reads from. For what Frigate should use, see frigate_export.rtsp_host.",
+    "address": "mediamtx",
+    "port": 8555
+  },
+
+  "cameras": {
+    "_help": "'enabled' empty = all Ring cameras on the account. Otherwise only the ones listed, by exact Ring name. 'disabled' always wins over 'enabled'. max_failures: stream restarts tolerated before a camera is dropped for the rest of the run - note the counter is only reset at startup, so on a long-lived process it accumulates. restart_delay_seconds: minimum wait before a failed stream is restarted.",
+    "enabled": [],
+    "disabled": [],
+    "max_failures": 100,
+    "restart_delay_seconds": 30
+  },
+
+  "ring": {
+    "_help": "login is REQUIRED; on first start 2FA is prompted once and the token is cached in paths.config. poll_interval (REQUIRED) is the main loop tick in seconds. idle_poll_seconds is how often the Ring history is queried without a push - the floor for motion latency, measured 34-44 s end to end at 30. event_kinds: which Ring event types count as motion; 'on_demand'/'on_demand_link' are live-view sessions and are deliberately not included. max_clip_seconds: longer recordings are skipped rather than downloaded.",
+    "login": {
+      "username": "EMAIL_ADDRESS_HERE",
+      "password": "PASSWORD_HERE"
+    },
+    "poll_interval": 5,
+    "idle_poll_seconds": 120,
+    "event_kinds": ["motion", "ding"],
+    "max_clip_seconds": 180,
+
+    "_help_camera_names": "Optional. Renames a camera for the RTSP path, MQTT topic and Frigate camera name in one place. Key = exact Ring name, value = the name to use. Empty {} keeps the Ring names.",
+    "camera_names": {},
+
+    "_help_transcode": "Optional, PER CAMERA. Key = exact Ring name. Only listed cameras are transcoded; everything else is passed through untouched. Use it when a camera delivers HEVC or a resolution the rest of the pipeline should not carry. 'preset' may be added and defaults to veryfast - do not use ultrafast, x264 forces Constrained Baseline with it and the profile then disagrees with the stills. Omit width/height to keep the original resolution.",
+    "transcode": {
+      "Ring camera name": {
+        "codec": "libx264",
+        "width": 1280,
+        "height": 720
+      }
+    }
+  },
+
+  "snapshot_refresh": {
+    "_help": "Periodically rebuilds the looping still from a fresh Ring snapshot, so a camera does not show the last motion frame for hours. 'enabled' is the master switch. default_interval_minutes applies ONLY to cameras absent from per_camera; 0 means off, which is why the feature does nothing until you list a camera. retries x delay_seconds is the fetch window (15 x 2 = 30 s): Ring is asked for a new snapshot and polled for a timestamp newer than the request, and a camera that needs longer returns nothing. Do not shorten it - at the library default of 3 x 1 s, two of four cameras here delivered nothing at all. Failures are normal and are swallowed; the previous still stays. The fetch runs off the motion loop, so a slow camera does not delay motion detection.",
+    "enabled": true,
+    "default_interval_minutes": 0,
+    "retries": 15,
+    "delay_seconds": 2,
+
+    "_help_per_camera": "PER CAMERA, in minutes. Key = exact Ring name including umlauts. This is the only place a single camera is turned on or given its own rate. A real motion clip resets the interval - a fresh clip beats a snapshot - so an active camera refreshes less often than the interval suggests, by design.",
+    "per_camera": {
+      "Ring camera name": 15,
+      "Another camera": 30
+    }
+  },
+
+  "still_video_duration": 2.0,
+  "still_video_fps": 5,
+  "still_video_crf": 30,
+  "still_video_preset": "veryfast",
+  "_help_still_video": "still_video_duration is REQUIRED (seconds of looping still per iteration). fps: null or 0 inherits the clip's frame rate. crf: null or 0 uses the clip's bitrate instead - 30 is markedly smaller AND faster here. preset: 'veryfast'. Never 'ultrafast': x264 then forces Constrained Baseline and ignores -profile:v, so the still's profile-level-id disagrees with the clips and the SDP stays wrong for the life of the stream.",
+
+  "mqtt": {
+    "_help": "Publishes the Ring push details - the LLM-written description, the classification, the snapshot URL - none of which the history API returns. Deliberately under its own prefix, not under frigate/. With discovery on, Home Assistant creates the entities by itself. Omit the whole section or set enabled false to skip it; MQTT being unavailable never stops the rest of ringbridge.",
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 1883,
+    "username": null,
+    "password": null,
+    "topic_prefix": "ringbridge",
+    "client_id": "ringbridge",
+    "discovery": true,
+    "discovery_prefix": "homeassistant"
+  },
+
+  "frigate": {
+    "_help": "Writes the Ring description onto the matching Frigate event. DISABLED and left that way on purpose: Frigate 0.17.2 answers POST /api/events/<id>/description with HTTP 200 and stores nothing unless object_descriptions and cameras.<n>.genai are configured, so it reports success while doing nothing. There is also a known correlation bug - it can attach the previous event's description. Use the mqtt section instead. match_window_seconds is how far apart a push and a Frigate event may be and still count as the same event.",
+    "enabled": false,
+    "url": "http://FRIGATE_HOST_HERE:5000",
+    "match_window_seconds": 90,
+    "set_sub_label": false
+  },
+
+  "frigate_export": {
+    "_help": "Writes a ready-made Frigate config snippet with the REAL measured resolutions, taken from each camera's most recent clip. ringbridge never touches the Frigate config itself - copy the block over. rtsp_host is what Frigate should connect to, i.e. this host as seen from Frigate, which is usually not rtsp_server.address. detect_defaults only fills in when a resolution cannot be measured; leave width/height null to let Frigate read them from the stream.",
+    "enabled": false,
+    "output_path": "/working/frigate-cameras.yml",
+    "rtsp_host": "RINGBRIDGE_HOST_HERE",
+    "rtsp_port": 8555,
+    "roles": ["detect", "record"],
+    "detect_defaults": {
+      "fps": 5,
+      "width": null,
+      "height": null
+    }
+  },
+
+  "_help_not_configurable": [
+    "Fixed in code, listed so you do not look for them here:",
+    "  DOWNLOAD_ATTEMPTS = 3          retries per clip download",
+    "  DOWNLOAD_RETRY_DELAY = 5 s     wait between those attempts",
+    "  PUSH_WINDOW_SECONDS = 300 s    how long a push keeps history polling hot",
+    "  TRANSCODE_PRESET = veryfast    default when ring.transcode sets no preset"
+  ]
+}
