@@ -12,6 +12,15 @@ from ringbridge.config import *
 from ringbridge.frigate_export import export as export_frigate_snippet
 
 
+# How long a stream has to run without trouble before its failure count is
+# cleared. Without this the count only ever grows: it is set to 0 at startup
+# and incremented on every restart, including successful ones, so a
+# long-lived process eventually hits max_failures and drops a camera that is
+# working fine. Observed here: ~1 Ring API timeout per hour would have
+# disabled a camera after roughly four days.
+HEALTHY_RESET = timedelta(minutes=30)
+
+
 log = logging.getLogger(__name__)
 
 class Application:
@@ -46,9 +55,21 @@ class Application:
         ss = self.stream_servers[camera_name]
 
         if not ss.is_running():
-            return False 
-        
-        file_name_new_clip = await self.cam_manager.check_for_motion(camera_name)
+            return False
+
+        try:
+            file_name_new_clip = await self.cam_manager.check_for_motion(camera_name)
+        except Exception as e:
+            # A Ring cloud error says nothing about the local stream, which
+            # is sitting there serving a perfectly good still. The caller's
+            # handler closes the stream, so letting this propagate cost a
+            # Frigate reconnect and an SDP renegotiation for every API
+            # timeout - three times in the first day, always on whichever
+            # camera was busiest. Errors raised further down are a different
+            # matter: those come from the stream itself and should close it.
+            log.warning(f"{camera_name}: Ring query failed ({e}) - "
+                        f"stream left running")
+            return False
 
         if not file_name_new_clip:
             await self._maybe_refresh_still(camera_name, ss)
@@ -149,6 +170,16 @@ class Application:
                         continue
                     ss_new.failure_count = ss.failure_count + 1
                     ss_new.datetime_started = datetime.now()
+
+                elif (ss.failure_count
+                      and datetime.now() > ss.datetime_started + HEALTHY_RESET):
+                    # max_failures is meant to catch a camera that keeps
+                    # failing, not to tally every hiccup over the life of the
+                    # process. See HEALTHY_RESET.
+                    log.info(f"{camera_name}: running cleanly since "
+                             f"{ss.datetime_started:%H:%M}, clearing failure "
+                             f"count ({ss.failure_count})")
+                    ss.failure_count = 0
 
             await asyncio.sleep(CONFIG['ring']['poll_interval'])
 
