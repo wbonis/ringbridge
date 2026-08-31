@@ -1,3 +1,4 @@
+import os
 import subprocess
 import threading
 import unicodedata
@@ -46,7 +47,6 @@ class StreamServer:
             '-f', 'concat',
             '-safe', '0',
             '-i', input_concat_file.resolve(),
-            '-flush_packets', '0',
             '-c:v', 'copy',
             '-c:a', 'copy',
             # ringbridge: ffmpeg otherwise publishes RTSP over UDP.
@@ -69,7 +69,17 @@ class StreamServer:
             '-f', 'rtsp',
             # '-avoid_negative_ts', '1',
             # '-use_wallclock_as_timestamps', '1',
-            '-fps_mode', 'drop',
+            # ringbridge: '-fps_mode drop' removed. With -c copy it is not a
+            # no-op: it discards all timestamps and has the muxer regenerate
+            # them from ONE nominal frame rate - while this stream alternates
+            # a 5 fps still and ~25 fps clips, so one of the two was stamped
+            # at 5x the wrong rate on the wire. Survived only because
+            # Frigate's preset uses -use_wallclock_as_timestamps 1. The
+            # concat demuxer produces continuous monotonic timestamps by
+            # itself; nothing here needs replacing them.
+            # '-flush_packets 0' removed with it: it buffered the last still
+            # packets until clip packets pushed them out - a burst exactly at
+            # the transition that matters - and buys nothing on RTSP/TCP.
             output_url
         ]
         
@@ -98,9 +108,17 @@ class StreamServer:
         video_file_name = Path(video_file_name)
         next_concat = PATH_CONCAT / f"{self.stream_name_sanitized}_next.concat"
 
-        with open(next_concat, 'w') as f:
+        # Atomically. The publisher re-opens this file on every pass of the
+        # still, i.e. every ~2 s while idle. A plain open/truncate/write has
+        # a window in which the reader sees an empty or half-written ffconcat
+        # file; the concat demuxer then errors and ffmpeg exits - a full
+        # stream teardown from a microsecond race. The clip files already get
+        # this treatment; the concat file is written twenty times as often.
+        tmp = next_concat.with_suffix('.concat.tmp')
+        with open(tmp, 'w') as f:
             f.write("ffconcat version 1.0\n")
             f.write(f"file '{video_file_name.resolve()}'\n")
+        os.replace(tmp, next_concat)
 
         # Whoever wrote last owns the file. The deferred still swap checks
         # this so it cannot overwrite a newer clip.
