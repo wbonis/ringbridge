@@ -78,6 +78,18 @@ DEFAULT_MAX_CLIP_SECONDS = 180
 # everything else - see the comment in ffmpeg.py.
 TRANSCODE_PRESET = 'veryfast'
 
+# Every clip's audio is normalised to this on ingest, whether or not the
+# camera has a video transcode spec. Ring changes the sample rate of a
+# camera's recordings server-side: buro_2 delivered 48 kHz all day on
+# 2026-08-31 and switched to 16 kHz between two recordings eleven minutes
+# apart. Audio format lives only in the SDP, so the first mismatched clip
+# produced 4846 "payload is too short" errors in eight seconds - exactly
+# during the motion it carried. Nothing downstream consumes the audio
+# (Frigate has it off), so one fixed cheap format ends the class.
+CANONICAL_AUDIO = ['-c:a', 'aac', '-ar', '16000', '-ac', '1']
+CANONICAL_AUDIO_RATE = '16000'
+CANONICAL_AUDIO_CHANNELS = '1'
+
 # ffmpeg encoder name -> the codec_name ffprobe reports for the result.
 # Used only to compare an existing clip against the transcode spec. An
 # encoder that is not listed counts as "cannot verify", and the clip is
@@ -546,14 +558,25 @@ class CameraManager:
         Unverifiable counts as matching; see ENCODER_CODEC_NAMES.
         """
         spec = (CONFIG['ring'].get('transcode') or {}).get(camera_name)
-        if not spec:
-            return True
 
         try:
-            _, video = StreamParameters(str(file_name)).wait()
+            audio, video = StreamParameters(str(file_name)).wait()
         except Exception as e:
             log.debug(f"{camera_name}: clip parameters unreadable ({e}) - "
                       f"leaving the clip as it is")
+            return True
+
+        # Audio canon applies to every camera; see CANONICAL_AUDIO. A clip
+        # with no audio track at all is left alone - normalising would have
+        # to invent silence, which is a bigger change than the drift.
+        if audio and (str(audio.get('sample_rate')) != CANONICAL_AUDIO_RATE
+                      or str(audio.get('channels')) != CANONICAL_AUDIO_CHANNELS):
+            log.info(f"{camera_name}: existing clip audio is "
+                     f"{audio.get('sample_rate')} Hz/{audio.get('channels')}ch, "
+                     f"canon is {CANONICAL_AUDIO_RATE}/{CANONICAL_AUDIO_CHANNELS}")
+            return False
+
+        if not spec:
             return True
 
         wanted = ENCODER_CODEC_NAMES.get(spec.get('codec', 'libx264'))
@@ -580,20 +603,23 @@ class CameraManager:
         the original clip stays in place - better an HEVC clip than none.
         """
         spec = (CONFIG['ring'].get('transcode') or {}).get(camera_name)
-        if not spec:
-            return
 
         tmp = file_name.with_suffix('.tc.mp4')
         args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
-                '-i', str(file_name),
-                '-c:v', spec.get('codec', 'libx264'),
-                '-preset', spec.get('preset', TRANSCODE_PRESET),
-                '-pix_fmt', 'yuv420p']
+                '-i', str(file_name)]
 
-        if spec.get('width') and spec.get('height'):
-            args += ['-vf', f"scale={spec['width']}:{spec['height']}"]
+        if spec:
+            args += ['-c:v', spec.get('codec', 'libx264'),
+                     '-preset', spec.get('preset', TRANSCODE_PRESET),
+                     '-pix_fmt', 'yuv420p']
+            if spec.get('width') and spec.get('height'):
+                args += ['-vf', f"scale={spec['width']}:{spec['height']}"]
+        else:
+            # No video spec: copy the video, normalise only the audio.
+            # ~1 s of CPU on a 120 s clip.
+            args += ['-c:v', 'copy']
 
-        args += ['-c:a', 'copy', str(tmp)]
+        args += CANONICAL_AUDIO + [str(tmp)]
 
         started = time.time()
         try:
@@ -606,10 +632,11 @@ class CameraManager:
 
         if tmp.exists() and tmp.stat().st_size > 0:
             os.replace(tmp, file_name)
-            log.info(f"{camera_name}: clip transcoded to "
-                     f"{spec.get('codec','libx264')}"
-                     f"{'/' + str(spec['height']) + 'p' if spec.get('height') else ''} "
-                     f"in {time.time()-started:.1f}s")
+            what = (f"{spec.get('codec','libx264')}"
+                    f"{'/' + str(spec['height']) + 'p' if spec.get('height') else ''}"
+                    if spec else "video copy")
+            log.info(f"{camera_name}: clip normalised ({what}, audio "
+                     f"{CANONICAL_AUDIO_RATE} Hz) in {time.time()-started:.1f}s")
         else:
             log.error(f"{camera_name}: transcode produced an empty file - "
                       f"keeping the original clip")
