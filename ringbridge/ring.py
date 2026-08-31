@@ -91,6 +91,13 @@ PUSH_CRED_FILE = ".ring_push.json"
 LISTENER_START_ATTEMPTS = 4
 LISTENER_RETRY_DELAY = 10
 
+# Periodic still refresh. The still is the last frame of the last motion
+# clip, so it is by definition the tail of something that moved - it shows
+# whatever triggered the event, and keeps showing it until the next one.
+# Refreshing from a cloud snapshot bounds that to one interval.
+# 0 = off. Shape and key names are aligned with blinkbridge.
+DEFAULT_SNAPSHOT_REFRESH_MINUTES = 0
+
 
 def sanitize(name: str) -> str:
     """Camera name -> filename component (identical to stream_server)."""
@@ -114,6 +121,10 @@ class CameraManager:
         # Time of the last push per camera, and of the last history query.
         self._push_at = {}
         self._last_history_check = defaultdict(float)
+        # Snapshot refresh: time of the last ATTEMPT (not the last success)
+        # and the bytes last received, per camera.
+        self._snapshot_at = defaultdict(float)
+        self._last_snapshot = {}
 
     # ------------------------------------------------------------------ auth
 
@@ -534,6 +545,81 @@ class CameraManager:
             tmp.unlink(missing_ok=True)
 
     # ------------------------------------------------------- CameraManager-API
+
+    def clip_path(self, camera_name: str) -> Path:
+        """The camera's current clip - the reference for stream parameters."""
+        return self._clip_path(camera_name)
+
+    def _snapshot_interval(self, camera_name: str) -> float:
+        cfg = CONFIG.get('snapshot_refresh') or {}
+        per_camera = cfg.get('per_camera') or {}
+        minutes = per_camera.get(
+            camera_name,
+            cfg.get('default_interval_minutes', DEFAULT_SNAPSHOT_REFRESH_MINUTES))
+        return float(minutes or 0) * 60
+
+    async def fetch_snapshot(self, camera_name: str) -> Union[Path, None]:
+        """
+        Fetch a fresh snapshot if this camera is due for one.
+
+        Returns the path to a JPEG, or None. The caller turns it into a
+        still; this only deals with fetching.
+
+        Two details that are load-bearing rather than cosmetic:
+
+        - The attempt timestamp is written BEFORE the request, not after a
+          success. Otherwise a camera that never delivers is retried on
+          every loop tick - here that would be every few seconds, forever.
+          Not hypothetical: three of four cameras on this account return
+          0 bytes, because only the newer models support it.
+        - Identical bytes are skipped. Re-encoding the still from a picture
+          that did not change costs seconds of CPU for no change on screen.
+        """
+        interval = self._snapshot_interval(camera_name)
+        if not interval:
+            return None
+
+        now = time.time()
+        if now - self._snapshot_at[camera_name] < interval:
+            return None
+
+        # Before the attempt, deliberately.
+        self._snapshot_at[camera_name] = now
+
+        dev = self._device(camera_name)
+        if dev is None:
+            return None
+
+        try:
+            data = await dev.async_get_snapshot()
+        except Exception as e:
+            log.debug(f"{camera_name}: snapshot failed ({e})")
+            return None
+
+        if not data:
+            log.debug(f"{camera_name}: snapshot returned no data - this "
+                      f"camera model may not support it")
+            return None
+
+        if self._last_snapshot.get(camera_name) == data:
+            log.debug(f"{camera_name}: snapshot unchanged, not rebuilding")
+            return None
+
+        self._last_snapshot[camera_name] = data
+
+        path = PATH_VIDEOS / f"{sanitize(camera_name)}_snapshot.jpg"
+        try:
+            path.write_bytes(data)
+        except Exception as e:
+            log.error(f"{camera_name}: could not write snapshot ({e})")
+            return None
+
+        log.debug(f"{camera_name}: fresh snapshot, {len(data)} B")
+        return path
+
+    def note_clip_added(self, camera_name: str) -> None:
+        """A real clip wins: restart the snapshot interval."""
+        self._snapshot_at[camera_name] = time.time()
 
     async def refresh_metadata(self) -> None:
         log.debug('refreshing device metadata')

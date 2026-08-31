@@ -51,12 +51,38 @@ class Application:
         file_name_new_clip = await self.cam_manager.check_for_motion(camera_name)
 
         if not file_name_new_clip:
+            await self._maybe_refresh_still(camera_name, ss)
             return False
 
         log.info(f"{ss.stream_name}: motion detected, adding video")
         ss.add_video(file_name_new_clip)
+        # A real clip wins - restart the snapshot interval, otherwise a
+        # refresh due a minute later would replace a genuinely fresh still.
+        self.cam_manager.note_clip_added(camera_name)
 
         return True
+
+    async def _maybe_refresh_still(self, camera_name: str, ss) -> None:
+        """
+        ringbridge: periodically rebuild the still from a cloud snapshot.
+
+        Only when the camera actually has a running stream and a clip to
+        take stream parameters from - the equivalent of gating on a LIVE
+        state. Every failure is swallowed: a stale still is always better
+        than a broken one.
+        """
+        try:
+            snapshot = await self.cam_manager.fetch_snapshot(camera_name)
+            if snapshot is None:
+                return
+
+            reference = self.cam_manager.clip_path(camera_name)
+            if not reference.exists():
+                return
+
+            ss.refresh_still_from_image(snapshot, reference)
+        except Exception as e:
+            log.warning(f"{camera_name}: still refresh failed: {e}")
         
     async def start(self) -> None:
         self.running = True

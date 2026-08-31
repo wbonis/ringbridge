@@ -30,6 +30,7 @@ class StreamServer:
         _n = re.sub(r'[^A-Za-z0-9]+', '_', _n).strip('_').lower()
         self.stream_name_sanitized = _n or 'camera'
         self.current_still_video = None
+        self._deferred_still_delete = None
 
     def _run_server(self) -> str:
         output_url = f"{RTSP_URL}/{self.stream_name_sanitized}"
@@ -163,6 +164,56 @@ class StreamServer:
 
         if removed:
             log.info(f"{self.stream_name}: removed {removed} orphaned still file(s)")
+
+    def refresh_still_from_image(self, image_file_name: Union[str, Path],
+                                 reference_video: Union[str, Path]) -> None:
+        """
+        Rebuild the still from an arbitrary image, keeping the clip's
+        stream parameters.
+
+        The picture content comes from `image_file_name` (a cloud
+        snapshot); everything that defines the stream - codec, resolution,
+        pixel format, frame rate, profile, audio layout - is read from
+        `reference_video`, the camera's own last clip. Anything else would
+        put a different profile-level-id or audio format into the SDP than
+        the clips carry, which is the failure mode this whole codebase is
+        shaped around.
+
+        Deletion of the previous still is deferred by one generation: the
+        publisher may still be reading it during the current loop
+        iteration, and the concat demuxer reopens the file each time round.
+        """
+        from ringbridge.ffmpeg import FrameToVideo, StreamParameters
+
+        params_audio, params_video = StreamParameters(str(reference_video)).wait()
+        if not params_video:
+            log.warning(f"{self.stream_name}: no video parameters from "
+                        f"{reference_video} - skipping still refresh")
+            return
+
+        dt = datetime.now()
+        next_still = PATH_VIDEOS / (f"{self.stream_name_sanitized}_still_"
+                                    f"{dt.strftime('%Y-%m-%d_%H-%M-%S-%f')}.mp4")
+
+        FrameToVideo(image_file_name, params_video, params_audio,
+                     output_duration=CONFIG['still_video_duration'],
+                     file_name_output_video=next_still).wait()
+
+        if not next_still.exists() or next_still.stat().st_size == 0:
+            log.warning(f"{self.stream_name}: still refresh produced an "
+                        f"empty file - keeping the current still")
+            next_still.unlink(missing_ok=True)
+            return
+
+        self._enqueue_clip(next_still)
+
+        # One generation behind, see docstring.
+        if self._deferred_still_delete:
+            self._deferred_still_delete.unlink(missing_ok=True)
+        self._deferred_still_delete = self.current_still_video
+        self.current_still_video = next_still
+
+        log.info(f"{self.stream_name}: still refreshed from snapshot")
 
     def start_server(self, file_name_initial_video: Union[str, Path]) -> None:
         log.debug(f"{self.stream_name}: starting server with {file_name_initial_video}")
