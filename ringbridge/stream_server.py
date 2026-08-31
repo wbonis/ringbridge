@@ -1,4 +1,5 @@
 import subprocess
+import threading
 import unicodedata
 import re
 import logging
@@ -88,7 +89,11 @@ class StreamServer:
 
         with open(next_concat, 'w') as f:
             f.write("ffconcat version 1.0\n")
-            f.write(f"file '{video_file_name.resolve()}'\n") 
+            f.write(f"file '{video_file_name.resolve()}'\n")
+
+        # Whoever wrote last owns the file. The deferred still swap checks
+        # this so it cannot overwrite a newer clip.
+        self._queued_clip = video_file_name
 
         return next_concat
 
@@ -113,9 +118,14 @@ class StreamServer:
             try:
                 wait_until_file_open(file_name_input_video, self.process.pid)
             except TimeoutError as e:
-                # Expiring is a normal state, not a failure, and it must not
-                # abort add_video(): the still below still has to be enqueued
-                # and the old one deleted.
+                # Expiring is a normal state, not a failure. But it must not
+                # fall through to enqueueing the still either: _enqueue_clip()
+                # OVERWRITES the concat file, so putting the still in now would
+                # replace a clip the publisher has not opened yet, and that
+                # clip would never play at all. Measured 2026-08-31: the
+                # teardown was gone and so was the motion event. The swap is
+                # therefore deferred until the publisher has actually got
+                # there.
                 #
                 # The wait only orders two writes to the concat file - it makes
                 # sure ffmpeg has reached the clip before the still is put
@@ -133,8 +143,11 @@ class StreamServer:
                 # Left fatal, this closed the stream three times on 2026-08-31,
                 # every time on whichever camera was busiest.
                 log.warning(f"{self.stream_name}: publisher had not reached "
-                            f"the new clip within the wait ({e}) - continuing, "
-                            f"the clip plays once the current file ends")
+                            f"the new clip within the wait ({e}) - deferring "
+                            f"the still so the clip still gets played")
+                svc.wait()
+                self._defer_still(Path(file_name_input_video), next_still_video)
+                return
             except Exception as e:
                 log.warning(f"{self.stream_name}: error waiting for the new "
                             f"clip to open ({e}) - continuing")
@@ -151,6 +164,42 @@ class StreamServer:
         
         self.current_still_video = next_still_video
     
+    def _defer_still(self, clip: Path, still: Path) -> None:
+        """
+        Put the still behind the clip once the publisher has really reached it.
+
+        Runs on a thread, because the wait is "how much of the currently
+        playing file is left" and that can be a whole clip - far too long to
+        hold up the motion loop. Nothing here touches Ring or the network; it
+        only rewrites the concat file at the right moment.
+        """
+        limit = int(CONFIG['ring'].get('max_clip_seconds', 180)) + 30
+
+        def run():
+            try:
+                wait_until_file_open(clip, self.process.pid, timeout=limit)
+            except Exception as e:
+                log.warning(f"{self.stream_name}: publisher never reached the "
+                            f"clip within {limit}s ({e}) - still not swapped in")
+                return
+
+            if self._queued_clip != clip:
+                log.debug(f"{self.stream_name}: a newer clip is queued, "
+                          f"dropping the deferred still")
+                return
+
+            self._enqueue_clip(still)
+            old_still, self.current_still_video = self.current_still_video, still
+            if old_still and old_still != still:
+                try:
+                    old_still.unlink()
+                except OSError:
+                    pass
+            log.info(f"{self.stream_name}: clip reached the publisher, "
+                     f"still swapped in behind it")
+
+        threading.Thread(target=run, daemon=True).start()
+
     def is_running(self) -> bool:
         return self.process.poll() is None
     

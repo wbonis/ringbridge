@@ -25,6 +25,11 @@ services:
       # at /tmp/ringbridge - then the limit applies and the fallback
       # survives.
       - /tmp/ringbridge:/working
+      # Log timestamps in the host's timezone. Mounted rather than a fixed
+      # TZ= value so the container follows the host instead of drifting after
+      # a change. Correlating a ringbridge line with a Ring event or a Frigate
+      # entry meant adding two hours in your head otherwise.
+      - /etc/localtime:/etc/localtime:ro
     tty: true # for color logs
     environment:
       - RINGBRIDGE_CONFIG=/config/config.json
@@ -45,5 +50,8 @@ services:
       # forces TCP for publishers AND readers. Over UDP the I-frames of
       # high-resolution cameras get torn apart ("invalid FU-A packet").
       - MTX_RTSPTRANSPORTS=tcp
+    volumes:
+      # Same reason as above, so its lines line up with ringbridge's.
+      - /etc/localtime:/etc/localtime:ro
     ports:
       - 8555:8555

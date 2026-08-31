@@ -4,6 +4,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from collections import defaultdict
+from rich.console import Console
 from rich.logging import RichHandler
 from rich.highlighter import NullHighlighter, JSONHighlighter
 from ringbridge.stream_server import StreamServer
@@ -233,7 +234,11 @@ async def main() -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(
-        format="%(message)s", datefmt="[%X]", handlers=[RichHandler(highlighter=NullHighlighter())]
+        format="%(message)s", datefmt="[%X]", handlers=[RichHandler(highlighter=NullHighlighter(),
+                              # Without a TTY rich assumes 80 columns and hard-wraps
+                              # every message, which makes the event details unreadable.
+                              console=Console(width=160),
+                              enable_link_path=False)]
     )
     logging.getLogger('ringbridge').setLevel(CONFIG['log_level'])
     logging.getLogger(__name__).setLevel(CONFIG['log_level'])
