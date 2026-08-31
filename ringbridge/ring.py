@@ -111,6 +111,15 @@ LISTENER_RETRY_DELAY = 10
 # 0 = off. Shape and key names are aligned with blinkbridge.
 DEFAULT_SNAPSHOT_REFRESH_MINUTES = 0
 
+# async_get_snapshot() asks Ring for a new snapshot and then polls
+# `retries` times, `delay` apart, for a timestamp newer than the request.
+# The library default of 3x1s is too short here: measured on 2026-08-31,
+# one camera returned nothing after 3.5s and a 24 KB picture after 21.6s.
+# A camera that just delivered will not deliver again straight away, so
+# failures stay normal however long the window is.
+DEFAULT_SNAPSHOT_RETRIES = 10
+DEFAULT_SNAPSHOT_DELAY_SECONDS = 2
+
 
 def sanitize(name: str) -> str:
     """Camera name -> filename component (identical to stream_server)."""
@@ -655,15 +664,22 @@ class CameraManager:
         if dev is None:
             return None
 
+        cfg = CONFIG.get('snapshot_refresh') or {}
+        retries = int(cfg.get('retries', DEFAULT_SNAPSHOT_RETRIES))
+        delay = int(cfg.get('delay_seconds', DEFAULT_SNAPSHOT_DELAY_SECONDS))
+
         try:
-            data = await dev.async_get_snapshot()
+            data = await dev.async_get_snapshot(retries=retries, delay=delay)
         except Exception as e:
             log.debug(f"{camera_name}: snapshot failed ({e})")
             return None
 
         if not data:
-            log.debug(f"{camera_name}: snapshot returned no data - this "
-                      f"camera model may not support it")
+            # Not a missing capability - the earlier wording claimed that and
+            # was wrong. Ring simply produced no snapshot newer than the
+            # request inside the window.
+            log.debug(f"{camera_name}: no snapshot newer than the request "
+                      f"within {retries * delay}s")
             return None
 
         if self._last_snapshot.get(camera_name) == data:
