@@ -4,6 +4,7 @@
   "still_video_crf": 30,
   "still_video_preset": "veryfast",
   "snapshot_refresh": {
+    "enabled": true,
     "default_interval_minutes": 0,
     "per_camera": {
       "Ring camera name": 15

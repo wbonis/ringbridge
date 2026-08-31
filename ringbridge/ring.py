@@ -552,6 +552,16 @@ class CameraManager:
 
     def _snapshot_interval(self, camera_name: str) -> float:
         cfg = CONFIG.get('snapshot_refresh') or {}
+
+        # Master switch, checked first. Not a duplicate of
+        # default_interval_minutes: that one only covers cameras NOT listed
+        # in per_camera, so without this there is no single way to turn the
+        # feature off - you would have to zero every per-camera entry and
+        # remember to restore them. Absent means enabled, so a config that
+        # only sets intervals keeps working.
+        if not cfg.get('enabled', True):
+            return 0.0
+
         per_camera = cfg.get('per_camera') or {}
         minutes = per_camera.get(
             camera_name,
