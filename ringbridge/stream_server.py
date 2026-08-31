@@ -110,7 +110,34 @@ class StreamServer:
         # wait for enqueued video to start
         if not still_only:
             log.debug(f"{self.stream_name}: waiting for new video to start")
-            wait_until_file_open(file_name_input_video, self.process.pid)
+            try:
+                wait_until_file_open(file_name_input_video, self.process.pid)
+            except TimeoutError as e:
+                # Expiring is a normal state, not a failure, and it must not
+                # abort add_video(): the still below still has to be enqueued
+                # and the old one deleted.
+                #
+                # The wait only orders two writes to the concat file - it makes
+                # sure ffmpeg has reached the clip before the still is put
+                # behind it. But the publisher runs with -re, so it opens the
+                # clip only when the demuxer reaches that entry, i.e. once the
+                # file currently playing has finished, in real time. The wait
+                # is therefore "how much of the current file is left", which is
+                # a still-length while idle and up to a whole clip when a
+                # second event arrives during playout - well past 10 s with
+                # max_clip_seconds at 180. Any timeout below the longest clip
+                # will fire eventually on a busy camera, so raising it is not
+                # the fix; the bound stays only so add_video() cannot block
+                # forever.
+                #
+                # Left fatal, this closed the stream three times on 2026-08-31,
+                # every time on whichever camera was busiest.
+                log.warning(f"{self.stream_name}: publisher had not reached "
+                            f"the new clip within the wait ({e}) - continuing, "
+                            f"the clip plays once the current file ends")
+            except Exception as e:
+                log.warning(f"{self.stream_name}: error waiting for the new "
+                            f"clip to open ({e}) - continuing")
             
         # enqueue next still video
         log.debug(f'{self.stream_name}: waiting for still video creation to finish')
