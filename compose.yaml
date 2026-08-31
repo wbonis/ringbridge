@@ -1,8 +1,8 @@
 services:
   ringbridge:
-    # build statt nur image: sonst laeuft "docker compose restart" auf dem
-    # alten Image weiter, obwohl neu gebaut wurde. Mit build+image baut
-    # "up -d --build" und ersetzt den Container in einem Schritt.
+    # build in addition to image: with image alone, "docker compose
+    # restart" keeps running the old image even after a rebuild. With both,
+    # "up -d --build" rebuilds and replaces the container in one step.
     build: .
     image: ringbridge:local
     container_name: ringbridge
@@ -11,39 +11,39 @@ services:
       - mediamtx
     volumes:
       - ./config:/config
-      # Arbeitsverzeichnis (Clips, Standbilder, Concat-Dateien).
+      # Working directory (clips, stills, concat files).
       #
-      # Bewusst ein Bind auf /tmp und KEIN tmpfs im Container: /tmp ist auf
-      # diesem Host bereits ein tmpfs (1,9 GB), der Inhalt liegt also
-      # ohnehin im RAM. Ein Container-tmpfs wuerde daran nichts aendern,
-      # aber bei jedem "up -d" geleert - und damit verlaere
-      # _fallback_clip() seine Grundlage: nach einem Neustart gaebe es
-      # keinen frueheren Clip mehr, auf den es zurueckgreifen koennte.
-      # Das Host-/tmp ueberlebt Container-Neustarts und wird erst beim
-      # Reboot geleert.
+      # Deliberately a bind onto /tmp and NOT a tmpfs inside the container:
+      # on this host /tmp already is a tmpfs (1.9 GB), so the contents live
+      # in RAM either way. A container tmpfs would change nothing about
+      # that, but it is wiped on every "up -d" - and that would take away
+      # what _fallback_clip() relies on: after a restart there would be no
+      # earlier clip left to fall back to. The host's /tmp survives
+      # container restarts and is only cleared on reboot.
       #
-      # Wer eine harte Obergrenze will, legt sie besser als eigenes tmpfs
-      # auf dem HOST unter /tmp/ringbridge an - dann gilt das Limit und
-      # der Rueckfall bleibt erhalten.
+      # If you want a hard ceiling, put it on the HOST as a dedicated tmpfs
+      # at /tmp/ringbridge - then the limit applies and the fallback
+      # survives.
       - /tmp/ringbridge:/working
     tty: true # for color logs
     environment:
       - RINGBRIDGE_CONFIG=/config/config.json
 
-  # Eigene MediaMTX-Instanz. Bewusst NICHT die aus /opt/stacks/blinkbridge
-  # mitbenutzen: sonst reisst ein "compose down" im Blink-Stack auch alle
-  # Ring-Streams weg. Jeder Stack steht fuer sich.
+  # Its own MediaMTX instance. Deliberately NOT sharing the one from a
+  # neighbouring stack: a "compose down" over there would take all Ring
+  # streams with it. Each stack stands on its own.
   mediamtx:
     image: bluenviron/mediamtx
-    container_name: mediamtx-ring   # global eindeutig; im eigenen Netz
-                                    # bleibt der DNS-Name "mediamtx"
+    container_name: mediamtx-ring   # globally unique; within its own
+                                    # network the DNS name stays "mediamtx"
     restart: unless-stopped
     environment:
-      # 8555 statt 8554 - der Blink-Stack hat 8554. Intern und extern
-      # derselbe Port, damit RTSP keine abweichenden Ports meldet.
+      # 8555 rather than the default 8554, leaving that free for a
+      # neighbouring stack. Same port inside and outside, so RTSP never
+      # reports a port that differs from the one clients connected to.
       - MTX_RTSPADDRESS=:8555
-      # erzwingt TCP fuer Publisher UND Leser. Per UDP zerreissen die
-      # I-Frames hochaufloesender Kameras ("invalid FU-A packet").
+      # forces TCP for publishers AND readers. Over UDP the I-frames of
+      # high-resolution cameras get torn apart ("invalid FU-A packet").
       - MTX_RTSPTRANSPORTS=tcp
     ports:
       - 8555:8555

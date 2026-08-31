@@ -16,12 +16,13 @@ log = logging.getLogger(__name__)
 class StreamServer:
     def __init__(self, stream_name: str):
         self.stream_name = stream_name
-        # ringbridge: zusaetzlich ASCII-falten - Ring-Kameras heissen z.B.
-        # "Buero 2"/"Camera B"; Umlaute im RTSP-Pfad machen nur Aerger.
-        # ringbridge: Falls fuer diese Kamera ein abweichender Name
-        # konfiguriert ist (ring.camera_names), gilt der - und zwar
-        # ueberall: RTSP-Pfad, MQTT-Thema, Frigate-Kamera. Ein Name
-        # statt drei.
+        # ringbridge: also ASCII-fold the name - Ring cameras are called
+        # things like "Camera B", and non-ASCII characters in an RTSP path
+        # only cause trouble.
+        # If a different name is configured for this camera
+        # (ring.camera_names), that one wins - and it wins everywhere:
+        # RTSP path, MQTT topic, Frigate camera. One name instead of
+        # three.
         _mapped = (CONFIG.get('ring', {}).get('camera_names') or {}).get(stream_name)
         _source = _mapped or stream_name
 
@@ -46,10 +47,11 @@ class StreamServer:
             '-flush_packets', '0',
             '-c:v', 'copy',
             '-c:a', 'copy',
-            # ringbridge: ffmpeg publiziert per RTSP sonst ueber UDP. MediaMTX
-            # laeuft hier mit MTX_RTSPTRANSPORTS=tcp und lehnt das mit
-            # "461 Unsupported Transport" ab. TCP ist ohnehin richtig: per UDP
-            # zerreissen die I-Frames hochaufloesender Kameras.
+            # ringbridge: ffmpeg otherwise publishes RTSP over UDP.
+            # MediaMTX runs with MTX_RTSPTRANSPORTS=tcp here and rejects
+            # that with "461 Unsupported Transport". TCP is the right
+            # choice anyway: over UDP the I-frames of high-resolution
+            # cameras get torn apart.
             '-rtsp_transport', 'tcp',
             '-f', 'rtsp',
             # '-avoid_negative_ts', '1',
@@ -131,24 +133,24 @@ class StreamServer:
 
     def _sweep_old_stills(self) -> None:
         """
-        Verwaiste Standbilder dieser Kamera entfernen.
+        Remove orphaned still files for this camera.
 
-        `add_video()` loescht das vorige Standbild nur, wenn
-        `current_still_video` gesetzt ist UND `still_only` False ist.
-        `start_server()` ruft es aber immer mit `still_only=True` auf, und
-        auf einem frischen StreamServer ist `current_still_video` ohnehin
-        None. Jeder Container- und jeder Stream-Neustart hinterliess damit
-        ein Standbild, das nie wieder angefasst wurde: am 2026-08-30 waren
-        es 103 Dateien mit 48 MB an einem Tag.
+        `add_video()` only deletes the previous still when
+        `current_still_video` is set AND `still_only` is False.
+        `start_server()` however always calls it with `still_only=True`,
+        and on a fresh StreamServer `current_still_video` is None anyway.
+        Every container and every stream restart therefore left behind a
+        still that was never touched again: on 2026-08-30 that was 103
+        files totalling 48 MB in a single day.
 
-        Auf Platte faellt das kaum auf, in einem tmpfs fuehrt es zu ENOSPC
-        mitten im Betrieb.
+        On disk that barely registers; in a tmpfs working directory it
+        means ENOSPC in the middle of operation.
 
-        Hier ist der Aufraeumpunkt sicher: der Publisher fuer diese Kamera
-        laeuft noch nicht, es liest also niemand auf den Dateien.
+        This is a safe point to clean up: the publisher for this camera is
+        not running yet, so nothing is reading those files.
         """
-        # Auch die .jpg-Zwischendateien: die entstehen beim Erzeugen des
-        # Standbilds und bleiben liegen, wenn das Encodieren scheitert.
+        # Include the .jpg intermediates: they are created while building
+        # the still and are left behind when the encode fails.
         patterns = (f"{self.stream_name_sanitized}_still_*.mp4",
                     f"{self.stream_name_sanitized}_still_*.jpg")
         removed = 0
@@ -157,10 +159,10 @@ class StreamServer:
                 old_still.unlink()
                 removed += 1
             except OSError as e:
-                log.debug(f"{self.stream_name}: {old_still.name} nicht loeschbar: {e}")
+                log.debug(f"{self.stream_name}: {old_still.name} not deletable: {e}")
 
         if removed:
-            log.info(f"{self.stream_name}: {removed} verwaiste Standbild-Datei(en) entfernt")
+            log.info(f"{self.stream_name}: removed {removed} orphaned still file(s)")
 
     def start_server(self, file_name_initial_video: Union[str, Path]) -> None:
         log.debug(f"{self.stream_name}: starting server with {file_name_initial_video}")

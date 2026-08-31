@@ -28,7 +28,7 @@
     "idle_poll_seconds": 30,
     "camera_names": {},
     "transcode": {
-      "Ring-Kameraname": {
+      "Ring camera name": {
         "codec": "libx264",
         "width": 1280,
         "height": 720

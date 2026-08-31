@@ -1,25 +1,26 @@
 """
-Ring-Anbindung fuer ringbridge.
+Ring integration for ringbridge.
 
-Portierung von blinkbridges `blink.py` auf die Ring-Cloud. Bedient dieselbe
-CameraManager-Schnittstelle, die `main.py` erwartet:
+A port of blinkbridge's `blink.py` to the Ring cloud. Serves the same
+CameraManager interface that `main.py` expects:
 
-    await start()                              Anmeldung + erste Metadaten
-    get_cameras()                              Namen der Kameras
-    await save_latest_clip(name, force=False)  letzten Clip laden -> Pfad
-    await check_for_motion(name)               neuer Clip? -> Pfad oder None
+    await start()                              log in + first metadata
+    get_cameras()                              camera names
+    await save_latest_clip(name, force=False)  fetch latest clip -> path
+    await check_for_motion(name)               new clip? -> path or None
     await refresh_metadata()
     await close()
 
-Prinzip (wie blinkbridge): Es wird KEIN Live-Stream aus der Ring-Cloud
-gezogen. Stattdessen wird nach einem Bewegungsereignis die fertige
-Cloud-Aufnahme als MP4 heruntergeladen. Zwischen den Ereignissen laeuft
-lokal eine Standbildschleife. Das ist der Grund, warum Ring seine
-Motion-Events weiter zustellt: es gibt keine dauerhafte Live-Session.
+Principle (as in blinkbridge): NO live stream is pulled from the Ring
+cloud. Instead, after a motion event the finished cloud recording is
+downloaded as MP4. Between events a still-image loop runs locally. That is
+precisely why Ring keeps delivering its motion events: there is no
+permanent live session.
 
-Erfordert ein Ring-Protect-Abo, da nur dann Cloud-Aufnahmen existieren.
+Requires a Ring Protect subscription, since only then do cloud recordings
+exist at all.
 
-Getestet gegen ring_doorbell 0.9.14.
+Tested against ring_doorbell 0.9.14.
 """
 
 import asyncio
@@ -49,50 +50,50 @@ log = logging.getLogger(__name__)
 USER_AGENT = "ringbridge/0.1"
 CRED_FILE = ".ring_token.json"
 
-# Wie viele History-Eintraege nach einer fertigen Aufnahme durchsucht werden.
+# How many history entries to search for a finished recording.
 HISTORY_LIMIT = 10
-# Frische Aufnahmen sind kurz nach dem Ereignis noch nicht abrufbar,
-# obwohl die History sie als "ready" fuehrt -> nachfassen.
+# Fresh recordings are briefly not retrievable after the event even though
+# the history already lists them as "ready" -> retry.
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_DELAY = 5
 
-# Welche Ereignisarten ueberhaupt in Frage kommen. "on_demand" bewusst
-# NICHT: das sind Live-View-Sitzungen, also der eigene Zugriff.
+# Which event kinds are eligible at all. Deliberately NOT "on_demand":
+# those are live-view sessions, i.e. your own access.
 DEFAULT_EVENT_KINDS = ['motion', 'ding']
-# Notbremse gegen Ausreisser (Ring liefert on_demand-Clips von 10+ Minuten).
+# Emergency brake against outliers (Ring serves on_demand clips of 10+
+# minutes).
 DEFAULT_MAX_CLIP_SECONDS = 180
 
-# Umcodierung je Kamera (ring.transcode). Gedacht fuer Ring-Kameras, die
-# HEVC liefern: Clip und Standbild kommen sonst aus verschiedenen
-# HEVC-Encodern (Ring bzw. libx265), deren Parametersaetze sich
-# unterscheiden - beim Schnitt per "copy" gibt das gelegentlich kaputte
-# Bilder. Nach H.264 umcodiert stammen beide aus derselben Familie und das
-# Problem verschwindet (blink2 laeuft mit 2560x1440 H.264 fehlerfrei).
-# Nebeneffekt: das Standbild ist danach in 0,3 s statt 4,7 s erzeugt.
-# Nicht 'ultrafast': x264 erzwingt damit "Constrained Baseline" und
-# ignoriert -profile:v. Der umcodierte Clip haette dann ein anderes Profil
-# als alles andere - siehe Kommentar in ffmpeg.py.
+# Per-camera transcoding (ring.transcode). Intended for Ring cameras that
+# deliver HEVC: otherwise clip and still come from different HEVC encoders
+# (Ring's and libx265), whose parameter sets differ - and splicing those
+# with "copy" produces occasional corrupt frames. Transcoded to H.264 both
+# come from the same family and the problem disappears (a 2560x1440 H.264
+# camera runs without errors).
+# Side effect: the still is then built in 0.3 s instead of 4.7 s.
+# Not 'ultrafast': x264 forces "Constrained Baseline" with it and ignores
+# -profile:v. The transcoded clip would then carry a different profile from
+# everything else - see the comment in ffmpeg.py.
 TRANSCODE_PRESET = 'veryfast'
 
-# Push-Kanal (FCM). Nach einem Push wird fuer diese Dauer bei jedem
-# Schleifendurchlauf nach der fertigen Aufnahme gefragt - Ring braucht
-# nach dem Ereignis noch Zeit zum Transkodieren.
+# Push channel (FCM). After a push, the finished recording is polled for
+# on every loop tick for this long - Ring still needs time to transcode
+# after the event.
 PUSH_WINDOW_SECONDS = 300
-# Ohne Push wird nur alle so vielen Sekunden ueberhaupt die History
-# abgefragt. Der Schleifentakt (poll_interval) darf dadurch klein
-# bleiben, ohne die Ring-API zu belasten.
+# Without a push, the history is only queried this often. That lets the
+# loop tick (poll_interval) stay small without loading the Ring API.
 DEFAULT_IDLE_POLL_SECONDS = 120
 PUSH_CRED_FILE = ".ring_push.json"
-# Die FCM-Registrierung bei Google scheitert sporadisch mit
-# PHONE_REGISTRATION_ERROR und klappt beim naechsten Anlauf. Deshalb
-# mehrfach versuchen; sobald sie einmal sitzt, liegen die Credentials
-# auf Platte und kuenftige Starts registrieren gar nicht mehr neu.
+# Registering with Google's FCM sporadically fails with
+# PHONE_REGISTRATION_ERROR and succeeds on the next attempt. Hence several
+# tries; once it lands, the credentials are on disk and later starts do not
+# register again at all.
 LISTENER_START_ATTEMPTS = 4
 LISTENER_RETRY_DELAY = 10
 
 
 def sanitize(name: str) -> str:
-    """Kameraname -> Dateinamensbestandteil (identisch zu stream_server)."""
+    """Camera name -> filename component (identical to stream_server)."""
     n = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode()
     n = re.sub(r'[^A-Za-z0-9]+', '_', n).strip('_').lower()
     return n or 'camera'
@@ -108,25 +109,25 @@ class CameraManager:
         self.listener = None
         self.mqtt = MqttPublisher()
         self.frigate = FrigateAnnotator()
-        # Letzte Push-Angaben je Kamera, fuer die Frigate-Zuordnung.
+        # Most recent push values per camera, used for Frigate matching.
         self._last_push_values = {}
-        # Zeitpunkt des letzten Push je Kamera bzw. der letzten History-Abfrage.
+        # Time of the last push per camera, and of the last history query.
         self._push_at = {}
         self._last_history_check = defaultdict(float)
 
     # ------------------------------------------------------------------ auth
 
     def _save_token(self, token: dict) -> None:
-        """token_updater-Callback: Ring erneuert Tokens im Betrieb."""
+        """token_updater callback: Ring refreshes tokens while running."""
         try:
             self._cred_path.write_text(json.dumps({
                 "token": token,
                 "hardware_id": self._hardware_id,
             }))
             self._cred_path.chmod(0o600)
-            log.debug("Ring-Token gespeichert")
+            log.debug("Ring token saved")
         except Exception as e:
-            log.error(f"Konnte Ring-Token nicht speichern: {e}")
+            log.error(f"could not save Ring token: {e}")
 
     async def _login(self) -> None:
         self._cred_path = PATH_CONFIG / CRED_FILE
@@ -139,11 +140,11 @@ class CameraManager:
                 self._hardware_id = saved.get("hardware_id")
                 log.info("Logging into Ring with saved token")
             except Exception as e:
-                log.warning(f"Gespeicherte Ring-Credentials unlesbar ({e}), neu anmelden")
+                log.warning(f"stored Ring credentials unreadable ({e}), logging in again")
                 token = None
 
-        # Stabile hardware_id: sonst sieht Ring bei jedem Start ein neues
-        # Geraet und verlangt erneut 2FA.
+        # Stable hardware_id: otherwise Ring sees a new device on every
+        # start and asks for 2FA again.
         if not self._hardware_id:
             self._hardware_id = str(uuid.uuid4())
 
@@ -169,11 +170,11 @@ class CameraManager:
         try:
             await self.ring.async_update_data()
         except AuthenticationError as e:
-            # Abgelaufenes/entwertetes Token: wegwerfen, damit der naechste
-            # Start wieder den Passwort-Weg (inkl. 2FA) nimmt.
-            log.error(f"Ring-Authentifizierung fehlgeschlagen: {e}")
+            # Expired or revoked token: discard it so the next start goes
+            # through the password path (including 2FA) again.
+            log.error(f"Ring authentication failed: {e}")
             if self._cred_path.exists():
-                log.info("Entferne ungueltiges Ring-Token")
+                log.info("removing invalid Ring token")
                 self._cred_path.unlink()
             raise
 
@@ -183,15 +184,15 @@ class CameraManager:
 
     def _on_ring_event(self, event) -> None:
         """
-        Callback des FCM-Listeners. Laeuft in einem fremden Thread, deshalb
-        hier nur einen Zeitstempel setzen und nichts Aufwendiges tun.
+        Callback of the FCM listener. Runs on a foreign thread, so it only
+        records a timestamp here and does nothing expensive.
         """
-        # Rohereignis mitloggen: RingEvent traegt laut Bibliothek keine
-        # Beschreibungstexte ("Eine Katze sitzt auf der Fensterbank"), die
-        # in der Ring-App erscheinen. Falls doch etwas mitkommt, steht es hier.
+        # Log the raw event: per the library, RingEvent carries none of the
+        # description texts ("A cat is sitting on the windowsill") that show
+        # up in the Ring app. If something does come along, it lands here.
         log.info(f"push: {event.device_name} kind={event.kind} state={event.state} "
                  f"id={event.id} update={event.is_update}")
-        log.debug(f"push roh: {vars(event)}")
+        log.debug(f"push raw: {vars(event)}")
 
         kinds = CONFIG['ring'].get('event_kinds', DEFAULT_EVENT_KINDS)
         if event.kind not in kinds:
@@ -201,21 +202,21 @@ class CameraManager:
 
     def _wrap_event_parser(self) -> None:
         """
-        Schutzhuelle um `RingEventListener._get_ring_event`.
+        Protective wrapper around `RingEventListener._get_ring_event`.
 
-        Ring verschickt Nachrichtenformate, die die Bibliothek nicht kennt.
-        Beobachtet: `KeyError: 'id'` in `_get_ring_event`, weil
-        `data.event.ding.id` fehlt. Die Ausnahme fliegt bis in den
-        FCM-Client ("Unexpected exception calling notification callback")
-        und das Ereignis geht verloren.
+        Ring sends message formats the library does not know. Observed:
+        `KeyError: 'id'` in `_get_ring_event`, because `data.event.ding.id`
+        is absent. The exception travels all the way into the FCM client
+        ("Unexpected exception calling notification callback") and the
+        event is lost.
 
-        Hier wird die Rohnachricht geloggt (dort koennten die
-        Beschreibungstexte der Ring-App stecken) und - wichtiger - der
-        Gerätename herausgezogen, damit auch eine unverstandene Nachricht
-        als Ausloeser taugt.
+        Here the raw message is logged (the Ring app's description texts
+        may be in there) and - more importantly - the device name is
+        extracted, so even a message we do not understand still works as a
+        trigger.
 
-        Greift auf eine private Methode zu; bei einem Update von
-        ring_doorbell hier zuerst nachsehen.
+        This reaches into a private method; on a ring_doorbell update,
+        check here first.
         """
         original = self.listener._get_ring_event
 
@@ -223,39 +224,38 @@ class CameraManager:
             try:
                 return original(msg_data)
             except Exception as e:
-                # Kein Fehlerfall: ring_doorbell versteht dieses Format
-                # nicht (data.event.ding hat kein "id"), wir aber schon -
-                # und es sind gerade die Nachrichten MIT Beschreibungstext.
-                # Deshalb nur DEBUG; der Erfolgsfall loggt weiter unten
-                # eine verstaendliche INFO-Zeile.
-                log.debug(f"push: von ring_doorbell nicht geparst "
-                          f"({type(e).__name__}: {e}) - wird selbst ausgewertet")
+                # Not a failure: ring_doorbell does not understand this
+                # format (data.event.ding has no "id"), but we do - and
+                # these are exactly the messages WITH a description text.
+                # Hence DEBUG only; the success path logs a readable INFO
+                # line further down.
+                log.debug(f"push: not parsed by ring_doorbell "
+                          f"({type(e).__name__}: {e}) - handling it ourselves")
                 try:
-                    log.debug("push roh: " + json.dumps(msg_data, ensure_ascii=False)[:2000])
+                    log.debug("push raw: " + json.dumps(msg_data, ensure_ascii=False)[:2000])
                 except Exception:
-                    log.debug(f"push roh (unserialisierbar): {msg_data}")
+                    log.debug(f"push raw (not serialisable): {msg_data}")
 
-                # Trotzdem verwerten: Ausloeser setzen und die reichen
-                # Felder nach MQTT geben (Beschreibung, Klassifikation,
-                # Snapshot) - genau die gibt es nur hier, nicht in der
-                # History-API.
+                # Use it anyway: set the trigger and hand the rich fields
+                # to MQTT (description, classification, snapshot) - those
+                # exist only here, not in the history API.
                 try:
                     self._handle_rich_push(msg_data)
                 except Exception as e:
-                    # Jetzt ist es wirklich ein Fehler: weder Bibliothek
-                    # noch wir konnten etwas damit anfangen.
-                    log.warning(f"push: Nachricht nicht verwertbar ({e})")
-                    log.warning("push roh: " + str(msg_data)[:1000])
+                    # Now it really is an error: neither the library nor
+                    # we could make anything of it.
+                    log.warning(f"push: message not usable ({e})")
+                    log.warning("push raw: " + str(msg_data)[:1000])
                 return None
 
         self.listener._get_ring_event = wrapped
 
     def _handle_rich_push(self, msg_data: dict) -> None:
         """
-        Die Felder aus einer Ring-Push-Nachricht auswerten.
+        Extract the fields from a Ring push message.
 
-        Aufbau (gemessen 2026-08-30):
-          android_config -> title, body   (body = der LLM-Satz)
+        Layout (measured 2026-08-30):
+          android_config -> title, body   (body = the LLM sentence)
           data.device    -> name, id, kind
           data.event.ding-> created_at, subtype, detection_type
           img            -> snapshot_url
@@ -283,12 +283,11 @@ class CameraManager:
         if values['description']:
             log.info(f"push: {name} [{values['detection']}] {values['description']}")
         else:
-            log.info(f"push: {name} [{values.get('detection') or '?'}] (ohne Beschreibung)")
+            log.info(f"push: {name} [{values.get('detection') or '?'}] (no description)")
 
-        # Frigate-Kameranamen koennen von den Ring-Namen abweichen
-        # (hier: "CAT Cam" heisst in Frigate "camera_c"). Ueber
-        # ring.camera_names uebersetzt, damit die MQTT-Themen zu den
-        # Frigate-Kameras passen und HA beides zusammenbringt.
+        # Frigate camera names may differ from the Ring names. Mapped via
+        # ring.camera_names so the MQTT topics line up with the Frigate
+        # cameras and Home Assistant can relate the two.
         mapping = CONFIG['ring'].get('camera_names') or {}
         key = mapping.get(name) or sanitize(name)
 
@@ -297,8 +296,8 @@ class CameraManager:
 
     async def _start_listener(self) -> None:
         """
-        FCM-Push abonnieren. Ergaenzung, kein Ersatz: schlaegt der Push fehl,
-        laeuft das History-Polling als Sicherheitsnetz weiter.
+        Subscribe to FCM push. An addition, not a replacement: if push
+        fails, history polling carries on as the safety net.
         """
         push_path = PATH_CONFIG / PUSH_CRED_FILE
 
@@ -307,14 +306,14 @@ class CameraManager:
             try:
                 credentials = json.loads(push_path.read_text())
             except Exception as e:
-                log.warning(f"Push-Credentials unlesbar ({e}), werden neu geholt")
+                log.warning(f"push credentials unreadable ({e}), fetching new ones")
 
         def save_credentials(creds):
             try:
                 push_path.write_text(json.dumps(creds))
                 push_path.chmod(0o600)
             except Exception as e:
-                log.error(f"Konnte Push-Credentials nicht speichern: {e}")
+                log.error(f"could not save push credentials: {e}")
 
         for attempt in range(1, LISTENER_START_ATTEMPTS + 1):
             try:
@@ -323,23 +322,23 @@ class CameraManager:
                 if await self.listener.start(timeout=20):
                     self._wrap_event_parser()
                     self.listener.add_notification_callback(self._on_ring_event)
-                    log.info(f"Push-Kanal (FCM) aktiv (Versuch {attempt})")
+                    log.info(f"push channel (FCM) active (attempt {attempt})")
                     return
-                log.warning(f"Push-Kanal: Start fehlgeschlagen "
-                            f"(Versuch {attempt}/{LISTENER_START_ATTEMPTS})")
+                log.warning(f"push channel: start failed "
+                            f"(attempt {attempt}/{LISTENER_START_ATTEMPTS})")
             except Exception as e:
-                log.warning(f"Push-Kanal: Fehler bei Versuch "
+                log.warning(f"push channel: error on attempt "
                             f"{attempt}/{LISTENER_START_ATTEMPTS}: {e}")
 
             self.listener = None
             if attempt < LISTENER_START_ATTEMPTS:
                 await asyncio.sleep(LISTENER_RETRY_DELAY)
 
-        log.warning("Push-Kanal nicht verfuegbar - es wird weiter gepollt "
-                    "(Sicherheitsnetz, hoehere Latenz)")
+        log.warning("push channel unavailable - continuing to poll "
+                    "(safety net, higher latency)")
 
     def _should_check(self, camera_name: str) -> bool:
-        """History abfragen? Nach einem Push ja, sonst nur im Leerlauftakt."""
+        """Query the history? After a push yes, otherwise only on the idle tick."""
         now = time.time()
 
         pushed_at = self._push_at.get(camera_name)
@@ -357,7 +356,7 @@ class CameraManager:
     def _device(self, camera_name: str):
         dev = self.ring.get_video_device_by_name(camera_name)
         if dev is None:
-            log.warning(f"{camera_name}: Kamera nicht (mehr) in der Ring-Liste")
+            log.warning(f"{camera_name}: camera no longer in the Ring device list")
         return dev
 
     def _clip_path(self, camera_name: str) -> Path:
@@ -365,22 +364,24 @@ class CameraManager:
 
     async def _last_ready_recording_id(self, dev) -> Union[int, None]:
         """
-        Neueste brauchbare Aufnahme.
+        The most recent usable recording.
 
-        Drei Filter, jeder aus einem konkreten Fehlschlag entstanden:
+        Three filters, each born from a concrete failure:
 
-        1. `recording.status == 'ready'` — `async_get_last_recording_id()`
-           der Bibliothek nimmt blind den letzten History-Eintrag.
-        2. `kind` in `event_kinds` — Ring fuehrt auch **`on_demand`**-
-           Aufnahmen, und das sind die eigenen Live-View-Sitzungen. Wer die
-           einspielt, zeigt Frigate stundenaltes Material aus dem eigenen
-           Zugriff (hier gemessen: ein 849-s-Clip mit 231 MB).
-        3. `duration <= max_clip_seconds` — Notbremse gegen Ausreisser.
+        1. `recording.status == 'ready'` — the library's
+           `async_get_last_recording_id()` blindly takes the last history
+           entry.
+        2. `kind` in `event_kinds` — Ring also lists **`on_demand`**
+           recordings, and those are your own live-view sessions. Splicing
+           one in shows Frigate hours-old footage of your own access
+           (measured here: an 849 s clip at 231 MB).
+        3. `duration <= max_clip_seconds` — emergency brake against
+           outliers.
         """
         try:
             history = await dev.async_history(limit=HISTORY_LIMIT)
         except Exception as e:
-            log.error(f"{dev.name}: History-Abfrage fehlgeschlagen: {e}")
+            log.error(f"{dev.name}: history query failed: {e}")
             return None
 
         kinds = CONFIG['ring'].get('event_kinds', DEFAULT_EVENT_KINDS)
@@ -408,49 +409,49 @@ class CameraManager:
 
     async def _download(self, dev, recording_id: int, file_name: Path) -> bool:
         """
-        Aufnahme holen.
+        Fetch a recording.
 
-        Primaerweg ist `async_recording_url()`: das liefert eine signierte
-        URL auf Ring's CDN und ist derselbe Weg, den auch das
-        Scrypted-Ring-Plugin nutzt. Der Bibliotheks-Direktdownload
-        (`/clients_api/dings/<id>/recording`) dient nur als Rueckfallebene —
-        er antwortet auf frische Aufnahmen zeitweise mit 404, obwohl die
-        History sie bereits als `ready` fuehrt.
+        The primary path is `async_recording_url()`: it returns a signed
+        URL on Ring's CDN, and it is the same path the Scrypted Ring plugin
+        uses. The library's direct download
+        (`/clients_api/dings/<id>/recording`) is only the fallback — it
+        intermittently answers 404 for fresh recordings even though the
+        history already lists them as `ready`.
         """
         for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
             if attempt > 1:
-                log.debug(f"{dev.name}: Aufnahme {recording_id}, Versuch {attempt} "
+                log.debug(f"{dev.name}: recording {recording_id}, attempt {attempt} "
                           f"in {DOWNLOAD_RETRY_DELAY}s")
                 await asyncio.sleep(DOWNLOAD_RETRY_DELAY)
 
             if await self._try_download(dev, recording_id, file_name):
-                # Umcodierung blockiert mehrere Sekunden -> in einen Thread,
-                # damit der Event-Loop weiterlaeuft.
+                # Transcoding blocks for several seconds -> run it on a
+                # thread so the event loop keeps going.
                 await asyncio.to_thread(self._transcode, dev.name, file_name)
                 return True
 
-        log.error(f"{dev.name}: Aufnahme {recording_id} nach {DOWNLOAD_ATTEMPTS} "
-                  f"Versuchen nicht ladbar")
+        log.error(f"{dev.name}: recording {recording_id} not retrievable after "
+                  f"{DOWNLOAD_ATTEMPTS} attempts")
         return False
 
     async def _try_download(self, dev, recording_id: int, file_name: Path) -> bool:
         """
-        Laedt in eine Nebendatei und benennt erst am Ende um.
+        Downloads into a side file and only renames at the end.
 
-        Wichtig: `file_name` ist die Datei, die der laufende ffmpeg gerade
-        liest oder gleich lesen wird. Wer da direkt hineinschreibt, liefert
-        ihm einen halb geschriebenen MP4 - im Log als
-        "Invalid NAL unit size" / "h264_mp4toannexb filter failed".
-        `os.replace()` ist auf demselben Dateisystem atomar; ein ffmpeg, das
-        die alte Datei bereits offen hat, liest sie unter POSIX zu Ende.
+        Important: `file_name` is the file the running ffmpeg is reading,
+        or is about to read. Writing into it directly hands ffmpeg a
+        half-written MP4 - visible in the log as "Invalid NAL unit size" /
+        "h264_mp4toannexb filter failed". `os.replace()` is atomic on the
+        same filesystem; an ffmpeg that already has the old file open reads
+        it to the end under POSIX semantics.
         """
         tmp_name = file_name.with_suffix(file_name.suffix + '.part')
 
-        # 1) signierte CDN-URL
+        # 1) signed CDN URL
         try:
             url = await dev.async_recording_url(recording_id)
         except Exception as e:
-            log.debug(f"{dev.name}: recording_url fehlgeschlagen: {e}")
+            log.debug(f"{dev.name}: recording_url failed: {e}")
             url = None
 
         if url:
@@ -459,29 +460,29 @@ class CameraManager:
                     if resp.status == 200:
                         data = await resp.read()
                         tmp_name.write_bytes(data)
-                        log.debug(f"{dev.name}: {len(data)} B via CDN-URL -> {file_name}")
+                        log.debug(f"{dev.name}: {len(data)} B via CDN URL -> {file_name}")
                     else:
-                        log.debug(f"{dev.name}: CDN-URL antwortete HTTP {resp.status}")
+                        log.debug(f"{dev.name}: CDN URL answered HTTP {resp.status}")
                         data = None
             except Exception as e:
-                log.debug(f"{dev.name}: CDN-Download fehlgeschlagen: {e}")
+                log.debug(f"{dev.name}: CDN download failed: {e}")
                 data = None
 
             if data and tmp_name.exists() and tmp_name.stat().st_size > 0:
                 os.replace(tmp_name, file_name)
                 return True
 
-        # 2) Rueckfall: Direktdownload der Bibliothek
+        # 2) Fallback: the library's direct download
         try:
             await dev.async_recording_download(
                 recording_id, filename=str(tmp_name), override=True)
         except Exception as e:
-            log.debug(f"{dev.name}: Direktdownload fehlgeschlagen: {e}")
+            log.debug(f"{dev.name}: direct download failed: {e}")
             tmp_name.unlink(missing_ok=True)
             return False
 
         if not tmp_name.exists() or tmp_name.stat().st_size == 0:
-            log.debug(f"{dev.name}: Aufnahme {recording_id} kam leer an")
+            log.debug(f"{dev.name}: recording {recording_id} arrived empty")
             tmp_name.unlink(missing_ok=True)
             return False
 
@@ -490,12 +491,11 @@ class CameraManager:
 
     def _transcode(self, camera_name: str, file_name: Path) -> None:
         """
-        Clip nach der vorkonfigurierten Vorgabe umcodieren.
+        Transcode the clip according to the configured spec.
 
-        Ueber eine Nebendatei und os.replace(), damit ein bereits lesender
-        ffmpeg nicht auf eine halb geschriebene Datei trifft. Schlaegt die
-        Umcodierung fehl, bleibt der Originalclip liegen - lieber ein
-        HEVC-Clip als gar keiner.
+        Through a side file and os.replace(), so an ffmpeg that is already
+        reading never meets a half-written file. If the transcode fails,
+        the original clip stays in place - better an HEVC clip than none.
         """
         spec = (CONFIG['ring'].get('transcode') or {}).get(camera_name)
         if not spec:
@@ -517,20 +517,20 @@ class CameraManager:
         try:
             subprocess.run(args, check=True, capture_output=True, timeout=180)
         except Exception as e:
-            log.error(f"{camera_name}: Umcodierung fehlgeschlagen ({e}) - "
-                      f"Originalclip wird verwendet")
+            log.error(f"{camera_name}: transcode failed ({e}) - "
+                      f"keeping the original clip")
             tmp.unlink(missing_ok=True)
             return
 
         if tmp.exists() and tmp.stat().st_size > 0:
             os.replace(tmp, file_name)
-            log.info(f"{camera_name}: Clip umcodiert nach "
+            log.info(f"{camera_name}: clip transcoded to "
                      f"{spec.get('codec','libx264')}"
                      f"{'/' + str(spec['height']) + 'p' if spec.get('height') else ''} "
                      f"in {time.time()-started:.1f}s")
         else:
-            log.error(f"{camera_name}: Umcodierung ergab leere Datei - "
-                      f"Originalclip wird verwendet")
+            log.error(f"{camera_name}: transcode produced an empty file - "
+                      f"keeping the original clip")
             tmp.unlink(missing_ok=True)
 
     # ------------------------------------------------------- CameraManager-API
@@ -544,35 +544,34 @@ class CameraManager:
 
     def _fallback_clip(self, camera_name: str, reason: str) -> Union[Path, None]:
         """
-        Auf den zuletzt geladenen Clip zurueckfallen.
+        Fall back to the most recently downloaded clip.
 
-        Ohne das wird die Kamera uebersprungen und existiert in Frigate
-        gar nicht - nur eine Warnung im Log, sonst kein Hinweis. Zwei
-        Ausloeser dafuer sind Normalbetrieb, keine Stoerung:
+        Without this the camera is skipped and does not exist in Frigate at
+        all - just a warning in the log and no other sign. Two of the
+        triggers for that are normal operation, not a fault:
 
-        - Der Ereignisfilter. Sind die letzten `HISTORY_LIMIT` Ereignisse
-          alle `on_demand` (also eigene Live-View-Sitzungen) oder laenger
-          als `max_clip_seconds`, bleibt nichts uebrig.
-        - Ein haengender Ring-API-Aufruf beim Containerstart.
+        - The event filter. If the last `HISTORY_LIMIT` events are all
+          `on_demand` (i.e. our own live-view sessions) or longer than
+          `max_clip_seconds`, nothing is left.
+        - A hanging Ring API call at container start.
 
-        Mit dem alten Clip bleibt die Kamera sichtbar und zeigt das
-        zuletzt bekannte Bild, bis wieder eine Aufnahme durchkommt.
-        Bewusst kein schwarzes Platzhalterbild: Frigate wuerde den
-        Wechsel darauf als Bewegung werten und Ereignisse auf schwarzem
-        Grund erzeugen.
+        With the old clip the camera stays visible and shows the last known
+        picture until a recording gets through again. Deliberately not a
+        black placeholder: Frigate would read the switch to it as motion
+        and generate events on a black background.
         """
         file_name = self._clip_path(camera_name)
         if file_name.exists() and file_name.stat().st_size > 0:
-            log.warning(f"{camera_name}: {reason} - verwende den zuletzt "
-                        f"geladenen Clip weiter")
+            log.warning(f"{camera_name}: {reason} - keeping the most "
+                        f"recently downloaded clip")
             return file_name
 
-        log.warning(f"{camera_name}: {reason}, und es liegt kein frueherer "
-                    f"Clip vor - Kamera bleibt vorerst ohne Stream")
+        log.warning(f"{camera_name}: {reason}, and no earlier clip is "
+                    f"available - camera stays without a stream for now")
         return None
 
     async def save_latest_clip(self, camera_name: str, force: bool = False) -> Union[Path, None]:
-        """Letzte vorhandene Cloud-Aufnahme laden (Startbild fuer den Stream)."""
+        """Fetch the latest available cloud recording (seed for the stream)."""
         file_name = self._clip_path(camera_name)
 
         if file_name.exists() and not force:
@@ -581,26 +580,26 @@ class CameraManager:
 
         dev = self._device(camera_name)
         if dev is None:
-            return self._fallback_clip(camera_name, "Kamera nicht in der Ring-Liste")
+            return self._fallback_clip(camera_name, "camera not in the Ring device list")
 
         recording_id = await self._last_ready_recording_id(dev)
         if recording_id is None:
             return self._fallback_clip(
                 camera_name,
-                "keine passende Cloud-Aufnahme gefunden (Ring-Protect aktiv? "
-                "Ereignisfilter?)")
+                "no suitable cloud recording found (Ring Protect active? "
+                "event filter?)")
 
         if not await self._download(dev, recording_id, file_name):
             return self._fallback_clip(
-                camera_name, f"Aufnahme {recording_id} nicht ladbar")
+                camera_name, f"recording {recording_id} not retrievable")
 
-        # Ausgangspunkt merken, sonst gilt diese Aufnahme sofort als "neu".
+        # Remember the starting point, or this recording counts as "new".
         self.camera_last_record[camera_name] = recording_id
 
         return file_name
 
     async def check_for_motion(self, camera_name: str) -> Union[Path, None]:
-        """Neue Cloud-Aufnahme? Dann laden und Pfad zurueckgeben."""
+        """New cloud recording? Then download it and return the path."""
         self.frigate.process()
 
         if not self._should_check(camera_name):
@@ -617,20 +616,20 @@ class CameraManager:
         if recording_id is None or self.camera_last_record[camera_name] == recording_id:
             return None
 
-        log.debug(f"{camera_name}: neue Aufnahme {recording_id}")
+        log.debug(f"{camera_name}: new recording {recording_id}")
 
         file_name = self._clip_path(camera_name)
 
         if not await self._download(dev, recording_id, file_name):
-            # Nicht merken - beim naechsten Durchlauf erneut versuchen.
+            # Do not remember it - retry on the next pass.
             return None
 
         self.camera_last_record[camera_name] = recording_id
-        # Aufnahme ist da - Push-Fenster fuer diese Kamera schliessen.
+        # Recording is in - close the push window for this camera.
         self._push_at.pop(camera_name, None)
 
-        # Frigate erzeugt gleich ein Ereignis aus dem eingespielten Clip -
-        # dort soll Ring's Beschreibung hinein.
+        # Frigate will shortly create an event from the spliced clip -
+        # that is where Ring's description should go.
         mapping = CONFIG['ring'].get('camera_names') or {}
         key = mapping.get(camera_name) or sanitize(camera_name)
         values = self._last_push_values.get(key)

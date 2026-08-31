@@ -1,42 +1,39 @@
 """
-Frigate-Anbindung: Ring-Beschreibung ins Frigate-Ereignis schreiben.
+Frigate integration: write the Ring description into the Frigate event.
 
-Ring liefert im Push einen von seinem LLM geschriebenen Satz. Frigate
-kennt ein Beschreibungsfeld je Ereignis (`POST /api/events/<id>/
-description`) und indexiert es bei aktivem `semantic_search` fuer die
-Suche. Beides zusammenzubringen macht die Ring-Beschreibung in Frigate
-auffindbar.
+Ring's push carries a sentence written by its LLM. Frigate has a
+description field per event (`POST /api/events/<id>/description`) and
+indexes it for search when `semantic_search` is enabled. Bringing the two
+together makes the Ring description findable inside Frigate.
 
-Zuordnung ueber die Zeit: Nach dem Einspielen eines Clips entsteht in
-Frigate wenige Sekunden spaeter ein Ereignis auf derselben Kamera. Wir
-suchen das erste Ereignis, das *nach* dem Einspielen begonnen hat.
+Matching is done over time: a few seconds after a clip is spliced in,
+Frigate creates an event on the same camera. We look for the first event
+that started *after* the splice.
 
-Das ist eine Heuristik, keine exakte Verknuepfung — Frigate und Ring
-kennen einander nicht. Bleibt ein Treffer aus, passiert nichts weiter:
-die Beschreibung steht ohnehin auch auf MQTT.
+That is a heuristic, not a real link - Frigate and Ring know nothing about
+each other. If no match turns up, nothing bad happens: the description is
+on MQTT anyway.
 
-⚠️ STANDARDMAESSIG AUS (frigate.enabled = false), aus zwei Gruenden:
+⚠️ OFF BY DEFAULT (frigate.enabled = false), for two reasons:
 
-1. Frigate verwirft die Beschreibung still. Ohne aktivierte
-   GenAI-Funktion antwortet `POST /api/events/<id>/description` mit
-   HTTP 200 und {"success": true}, speichert aber nichts — nachgeprueft
-   am 2026-08-30 gegen Frigate 0.17.2: zurueckgelesen kommt `None`, und
-   die Suche findet den Text nicht. `object_descriptions` steht bei
-   allen Kameras auf OFF, und `cameras.<name>.genai` ist gar nicht
-   gesetzt; der MQTT-Schalter greift deshalb auch nicht.
-   Vor dem Einschalten also erst in Frigate GenAI einrichten
-   (Provider + Schluessel, pro Kamera aktiv) — dann erzeugt Frigate
-   allerdings auch eigene Beschreibungen und ueberschreibt unsere
-   moeglicherweise.
+1. Frigate discards the description silently. Without its GenAI feature
+   enabled, `POST /api/events/<id>/description` answers with HTTP 200 and
+   {"success": true} but stores nothing - verified on 2026-08-30 against
+   Frigate 0.17.2: reading it back returns `None`, and search does not
+   find the text. `object_descriptions` was OFF on every camera and
+   `cameras.<name>.genai` was not set at all, which is also why the MQTT
+   switch for it had no effect.
+   So before enabling this, set up GenAI in Frigate first (provider +
+   key, enabled per camera) - at which point Frigate will also generate
+   its own descriptions and may overwrite ours.
 
-2. **Bekannter Fehler, noch nicht behoben:** Es gibt keine Verknuepfung
-   zwischen einem Push und dem Clip, der spaeter eingespielt wird.
-   `remember()` bekommt einfach die zuletzt gesehenen Push-Werte. Kommt
-   der Push spaeter als der Clip (am 2026-08-30 beobachtet: Clip
-   14:27:14, Schreibvorgang 14:27:38, zugehoeriger Push erst 14:27:47),
-   wird die Beschreibung des VORIGEN Ereignisses geschrieben.
-   Vor einer Reaktivierung muss die Zuordnung ueber die Aufnahme-ID
-   oder den Ereigniszeitpunkt laufen, nicht ueber "zuletzt gesehen".
+2. **Known bug, not yet fixed:** there is no link between a push and the
+   clip that gets spliced in later. `remember()` simply receives the most
+   recently seen push values. If the push arrives later than the clip
+   (observed on 2026-08-30: clip 14:27:14, write 14:27:38, matching push
+   only at 14:27:47), the description of the PREVIOUS event is written.
+   Before re-enabling this, matching has to go through the recording ID or
+   the event timestamp, not through "most recently seen".
 """
 
 import json
@@ -50,11 +47,11 @@ from ringbridge.config import *
 
 log = logging.getLogger(__name__)
 
-# Wie lange nach dem Einspielen auf ein passendes Frigate-Ereignis
-# gewartet wird, bevor aufgegeben wird.
+# How long to keep waiting for a matching Frigate event after a splice
+# before giving up.
 DEFAULT_MATCH_WINDOW = 90
-# Wieviel frueher als der Einspielzeitpunkt ein Ereignis noch zaehlt.
-# Frigate kann die Erkennung leicht vordatieren.
+# How much earlier than the splice an event may still count. Frigate can
+# date its detection slightly ahead.
 MATCH_BACKDATE = 10
 
 
@@ -69,11 +66,11 @@ class FrigateAnnotator:
         self._pending = {}
 
         if self.enabled and not self.url:
-            log.warning("frigate.enabled ist true, aber frigate.url fehlt")
+            log.warning("frigate.enabled is true but frigate.url is missing")
             self.enabled = False
 
     def remember(self, camera_key: str, values: dict) -> None:
-        """Nach dem Einspielen eines Clips: auf das Frigate-Ereignis warten."""
+        """After splicing a clip: start waiting for the Frigate event."""
         if not self.enabled or not values.get('description'):
             return
 
@@ -83,10 +80,10 @@ class FrigateAnnotator:
             'values': values,
             'deadline': now + self.window,
         }
-        log.debug(f"frigate: warte auf Ereignis fuer {camera_key}")
+        log.debug(f"frigate: waiting for an event for {camera_key}")
 
     def process(self) -> None:
-        """Bei jedem Schleifendurchlauf aufrufen; schluckt alle Fehler."""
+        """Call on every loop tick; swallows all errors."""
         if not self.enabled or not self._pending:
             return
 
@@ -95,8 +92,8 @@ class FrigateAnnotator:
             entry = self._pending[camera_key]
 
             if now > entry['deadline']:
-                log.info(f"frigate: kein Ereignis fuer {camera_key} innerhalb "
-                         f"{self.window}s - Beschreibung nicht zugeordnet")
+                log.info(f"frigate: no event for {camera_key} within "
+                         f"{self.window}s - description not attached")
                 self._pending.pop(camera_key, None)
                 continue
 
@@ -104,7 +101,7 @@ class FrigateAnnotator:
                 if self._try_annotate(camera_key, entry):
                     self._pending.pop(camera_key, None)
             except Exception as e:
-                log.debug(f"frigate: Zuordnung fuer {camera_key} fehlgeschlagen: {e}")
+                log.debug(f"frigate: matching for {camera_key} failed: {e}")
 
     # ------------------------------------------------------------------
 
@@ -123,7 +120,7 @@ class FrigateAnnotator:
     def _try_annotate(self, camera_key: str, entry: dict) -> bool:
         events = self._get(f"/api/events?camera={camera_key}&limit=5")
 
-        # Aeltestes passendes Ereignis nach dem Einspielzeitpunkt.
+        # Oldest matching event after the splice point.
         candidates = [e for e in events
                       if e.get('start_time', 0) >= entry['since']]
         if not candidates:
@@ -141,8 +138,8 @@ class FrigateAnnotator:
                 self._post(f"/api/events/{event_id}/sub_label",
                            {"subLabel": entry['values']['detection']})
             except Exception as e:
-                log.debug(f"frigate: sub_label fehlgeschlagen: {e}")
+                log.debug(f"frigate: sub_label failed: {e}")
 
-        log.info(f"frigate: Beschreibung an Ereignis {event_id} "
-                 f"({camera_key}) geschrieben")
+        log.info(f"frigate: description written to event {event_id} "
+                 f"({camera_key})")
         return True

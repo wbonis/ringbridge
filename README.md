@@ -1,105 +1,127 @@
-# ringbridge — Ring-Kameras → RTSP → Frigate
+# ringbridge — Ring cameras → RTSP → Frigate
 
-## Herkunft und Lizenz — bitte zuerst lesen
+## Origin and licence — please read first
 
-ringbridge ist eine **Portierung von
-[roger-/blinkbridge](https://github.com/roger-/blinkbridge)** auf Ring.
-Gleiche Idee, andere Cloud.
+ringbridge is a **port of
+[roger-/blinkbridge](https://github.com/roger-/blinkbridge)** to Ring.
+Same idea, different cloud.
 
-## Warum das Ganze
+## Why this exists
 
-Frigate braucht einen **durchgehenden** Stream. Ring liefert keinen — und
-ein erzwungener Dauerstream hat einen teuren Nebeneffekt: Ring stellt dann
-**keine Bewegungsereignisse** mehr zu. Das ist kein Gerücht, sondern steht
-so in der Scrypted-Ring-README und im ring-mqtt-Wiki, und wir haben es am
-2026-08-30 auf einer laufenden Installation nachgemessen: mit
-Dauerstream blieben die Bewegungsereignisse aus, ohne kamen sie
-zuverlässig.
+Frigate needs a **continuous** stream. Ring does not provide one — and
+forcing a permanent stream has an expensive side effect: Ring then stops
+delivering **motion events** altogether. That is not hearsay; it is stated
+in the Scrypted Ring plugin README and in the ring-mqtt wiki, and we
+measured it on a running installation on 2026-08-30: with a permanent
+stream the motion events stopped, without one they arrived reliably.
 
-ringbridge dreht es um:
+ringbridge turns it around:
 
-- Zwischen den Ereignissen läuft eine **lokal erzeugte Standbildschleife**.
-  Frigate sieht eine Kamera, die nie ausfällt.
-- Bei Bewegung wird die **fertige Cloud-Aufnahme als MP4 geladen** und in
-  den laufenden RTSP-Stream eingespielt.
-- Es gibt **keine Live-Session** zu Ring → die Motion-Events bleiben heil.
+- Between events, a **locally generated still-image loop** runs. Frigate
+  sees a camera that never drops out.
+- On motion, the **finished cloud recording is downloaded as MP4** and
+  spliced into the running RTSP stream.
+- There is **no live session** to Ring, so the motion events stay intact.
 
-Preis: Der Clip steht erst bereit, wenn Ring ihn transkodiert hat. Rechne
-mit **30–60 s Verzögerung**. Für „was war da?" gut, für Live-Alarm nicht.
+The price: the clip is only available once Ring has transcoded it. Expect
+**30–60 s of delay**. Good for "what happened?", not for live alerting.
 
-## Voraussetzungen
+## Requirements
 
-- **Ring Protect**: ohne Abo existieren keine Cloud-Aufnahmen, und dann
-  hat ringbridge nichts zu holen.
-- **MediaMTX** als RTSP-Server. Die mitgelieferte `compose.yaml` startet
-  eine eigene Instanz (Port 8555); ein separater Server ist nicht nötig.
+- **Ring Protect**: without a subscription there are no cloud recordings,
+  and then ringbridge has nothing to fetch.
+- **MediaMTX** as the RTSP server. The bundled `compose.yaml` starts its
+  own instance (port 8555); no separate server is needed.
 
-## Verhältnis zum Original
+## Relationship to the original
 
-| Datei | Herkunft und Änderung |
+| File | Origin and changes |
 |---|---|
-| `ring.py` | **neu** — ersetzt `blink.py`, spricht `ring_doorbell`; Push (FCM) + Polling, Ereignisfilter, atomarer Clip-Tausch, Umcodierung je Kamera |
-| `mqtt.py` | **neu** — Beschreibung/Klassifikation/Snapshot nach MQTT, HA-Discovery |
-| `frigate.py` | **neu** — Beschreibung ins Frigate-Ereignis (standardmäßig aus, Gründe im Modul-Docstring) |
-| `main.py` | aus blinkbridge; Imports, `CONFIG['blink']` → `CONFIG['ring']`, `None`-Behandlung wenn kein Clip verfügbar |
-| `ffmpeg.py` | aus blinkbridge; codec-unabhängige Stream-Auswahl (Ring mischt H.264 und HEVC), Profilnamen normalisiert, eindeutige Zwischendatei je Kamera, Standbild mit eigener Bildrate und CRF |
-| `stream_server.py` | aus blinkbridge; Kameranamen ASCII-gefaltet (`Camera B` → `camera_b`), `-rtsp_transport tcp` beim Publizieren |
-| `config.py` | aus blinkbridge; `BLINKBRIDGE_CONFIG` → `RINGBRIDGE_CONFIG` |
-| `utils.py` | aus blinkbridge, unverändert |
-| `Dockerfile` | `python:3.12-slim` statt `alpine`, `ring_doorbell` statt `blinkpy` |
+| `ring.py` | **new** — replaces `blink.py`, talks to `ring_doorbell`; push (FCM) + polling, event filter, atomic clip swap, per-camera transcoding |
+| `mqtt.py` | **new** — description/classification/snapshot to MQTT, HA discovery |
+| `frigate.py` | **new** — writes the description into the Frigate event (off by default, reasons in the module docstring) |
+| `frigate_export.py` | **new** — generates a Frigate camera config snippet |
+| `main.py` | from blinkbridge; imports, `CONFIG['blink']` -> `CONFIG['ring']`, handling for "no clip available" |
+| `ffmpeg.py` | from blinkbridge; codec-agnostic stream selection (Ring mixes H.264 and HEVC), profile names normalised, per-camera temp file, still with its own frame rate, CRF and preset, audio made optional, worker-thread exceptions re-raised |
+| `stream_server.py` | from blinkbridge; camera names ASCII-folded (`Camera B` -> `camera_b`), `-rtsp_transport tcp` when publishing, orphaned stills swept |
+| `config.py` | from blinkbridge; `BLINKBRIDGE_CONFIG` -> `RINGBRIDGE_CONFIG` |
+| `utils.py` | from blinkbridge, unchanged |
+| `Dockerfile` | `python:3.12-slim` instead of `alpine`, `ring_doorbell` instead of `blinkpy` |
 
-Die Begründungen zu den einzelnen Abweichungen stehen als Kommentare an
-der jeweiligen Codestelle.
+The reasoning behind each individual deviation sits as a comment at the
+relevant place in the code.
 
-## Erster Start
+## First start
 
-Zugangsdaten in `config/config.json` eintragen, dann **interaktiv**
-starten — die 2FA-Abfrage ist ein blockierender stdin-Prompt:
+Put your credentials into `config/config.json`, then start
+**interactively** — the 2FA prompt is a blocking read on stdin:
 
     cd ringbridge
     docker compose run --rm ringbridge
 
-Nach erfolgreicher Anmeldung liegt das Token in `config/.ring_token.json`
-(Rechte 600). Danach reicht:
+After a successful login the token is stored in
+`config/.ring_token.json` (mode 600). From then on:
 
     docker compose up -d
 
-Die `hardware_id` wird mitgespeichert. Ohne sie sähe Ring bei jedem Start
-ein neues Gerät und verlangte erneut 2FA.
+The `hardware_id` is stored alongside it. Without it, Ring would see a new
+device on every start and ask for 2FA again.
 
-## Einstellungen, die aus der Blink-Praxis stammen
+## Settings that came out of practice
 
-Auf diesem Host hat blinkbridge mit den Vorgabewerten Ärger gemacht. Die
-Lehren stecken hier schon in `config/config.json`:
+Running this against real cameras surfaced a number of defaults that do
+not hold up. The lessons are already baked into `config/config.json`:
 
-| Wert | Vorgabe | hier | warum |
+| Key | Upstream | Here | Why |
 |---|---|---|---|
-| `still_video_duration` | 0.5 | **2.0** | Das Standbild ist im Kern ein I-Frame. Bei 0,5 s wird der zweimal pro Sekunde neu übertragen — 4,8 Mbit/s für ein *stehendes Bild*. |
-| `poll_interval` | 1 | **30** | Sekündliches Fragen provoziert API-Timeouts. Clips brauchen ohnehin ~30 s. |
-| `max_failures` | 3 | **100** | Im Original schaltet ein einzelner API-Hänger die Kamera **dauerhaft** ab (`main.py`: `stream_servers.pop(camera)`). |
-| `restart_delay_seconds` | 60 | **30** | Halbiert die Lücke in Frigate nach einem Fehler. |
+| `poll_interval` | 1 | **5** | This is now only the loop tick, not the API rate — see `idle_poll_seconds`. Polling every second provokes API timeouts. |
+| `idle_poll_seconds` | — | **30** | How often the history is actually queried without a push. A push shortcuts this and triggers a check on the next tick. |
+| `max_failures` | 3 | **100** | Upstream disables a camera **permanently** after a single API hiccup (`main.py`: `stream_servers.pop(camera)`). |
+| `restart_delay_seconds` | 60 | **30** | Halves the gap in Frigate after a failure. |
+| `still_video_duration` | 0.5 | **2.0** | The still is essentially one I-frame. At 0.5 s it is retransmitted twice a second. |
+| `still_video_fps` | — | **5** | The still does not need the clip's frame rate. 2 s at 25 fps is 50 frames of pure encoder cost for a *static image*. |
+| `still_video_crf` | — | **30** | CRF instead of the clip's bitrate: faster and smaller. |
+| `still_video_preset` | — | **veryfast** | **Not `ultrafast`** — x264 forces "Constrained Baseline" with it and ignores `-profile:v`, which puts a different `profile-level-id` in the SDP than the clips carry. |
+| `event_kinds` | — | **motion, ding** | Ring also lists `on_demand` recordings — those are your own live-view sessions, not events. |
+| `max_clip_seconds` | — | **180** | Emergency brake. An `on_demand` recording can run for ten minutes. |
 
-Zusätzlich muss MediaMTX auf **TCP** stehen (`MTX_RTSPTRANSPORTS=tcp`).
-Per UDP zerreißen die I-Frames hochauflösender Kameras
-(`invalid FU-A packet`), und Frigate bekommt dann bereits beschädigte
-Bilder — was TCP auf der Leseseite nicht mehr reparieren kann.
+MediaMTX additionally has to be set to **TCP**
+(`MTX_RTSPTRANSPORTS=tcp`). Over UDP the I-frames of high-resolution
+cameras get torn apart (`invalid FU-A packet`), and Frigate then receives
+already-damaged pictures — which TCP on the reading side can no longer
+repair.
+
+## The rule behind most of the above
+
+Everything in a `-c copy` concat has to share the same stream parameters.
+Clip and still are spliced into one another, so codec, resolution, frame
+rate, pixel format, profile and audio layout all have to line up. Most of
+the odd-looking details in `ffmpeg.py` exist to keep that true. When it is
+violated the failure is rarely obvious: the video geometry still corrects
+itself through the in-band SPS, while audio format and profile come only
+from the SDP and stay wrong for the life of the stream.
 
 ## Frigate
 
+`frigate_export` writes a ready-made snippet (default:
+`/working/frigate-cameras.yml`) with the real, measured resolutions.
+Copy it into your Frigate config — ringbridge never touches that file
+itself.
+
     go2rtc:
       streams:
-        ring_camera_d: rtsp://192.0.2.10:8555/camera_d
+        camera_d: rtsp://192.0.2.10:8555/camera_d
 
     cameras:
-      ring_camera_d:
+      camera_d:
         ffmpeg:
           inputs:
-            - path: rtsp://127.0.0.1:8554/ring_camera_d
+            - path: rtsp://127.0.0.1:8554/camera_d
               input_args: preset-rtsp-restream
               roles: [detect, record]
         detect:
           fps: 5
 
-Frigate meldet am Übergang Standbild→Clip Bewegung. Das ist erwünscht — es
-löst die Erkennung aus. Der Rückschnitt zum neuen Standbild vermutlich
-auch; falls das doppelte Ereignisse gibt, `motion` nachziehen.
+Frigate reports motion at the still->clip transition. That is intended — it
+is what triggers detection. The cut back to the new still probably does
+too; if that produces duplicate events, tune `motion`.

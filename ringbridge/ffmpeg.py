@@ -11,8 +11,8 @@ from ringbridge.config import *
 log = logging.getLogger(__name__)
 
 
-# ffprobe-Profilname -> Encoder-Profilname. Alles andere wird
-# kleingeschrieben durchgereicht; passt es nicht, entfaellt die Option.
+# ffprobe profile name -> encoder profile name. Anything else is passed
+# through lowercased; if that does not fit, the option is dropped.
 _PROFILE_MAP = {
     'constrained baseline': 'baseline',
     'constrained high': 'high',
@@ -25,12 +25,12 @@ _PROFILE_OK = {'baseline', 'main', 'high', 'high10', 'high422', 'high444',
 
 
 def _profile_args(profile):
-    """-profile:v nur setzen, wenn der Name fuer den Encoder brauchbar ist."""
+    """Only set -profile:v when the name is usable by the encoder."""
     if not profile:
         return []
     name = _PROFILE_MAP.get(profile.lower(), profile.lower())
     if name not in _PROFILE_OK:
-        log.debug(f"Profil {profile!r} unbekannt - -profile:v wird weggelassen")
+        log.debug(f"profile {profile!r} unknown - dropping -profile:v")
         return []
     return ['-profile:v', name]
 
@@ -57,11 +57,11 @@ class StreamParameters:
         js = json.loads(out.decode('utf-8'), parse_float=lambda x: x, parse_int=lambda x: x)
         js = js['streams']
 
-        # ringbridge: Original suchte fest nach codec_name 'aac'/'h264'.
-        # Ring mischt die Codecs - 'Camera D' liefert HEVC, die anderen
-        # H.264. Auswahl ueber codec_type ist codec-unabhaengig; FrameToVideo
-        # nimmt den Encoder ohnehin aus params_video['codec_name'], und
-        # ffmpeg loest '-c:v hevc' selbst auf libx265 auf.
+        # ringbridge: the original looked for codec_name 'aac'/'h264'
+        # specifically. Ring mixes codecs - one camera delivers HEVC, the
+        # others H.264. Selecting by codec_type is codec-agnostic;
+        # FrameToVideo takes the encoder from params_video['codec_name']
+        # anyway, and ffmpeg resolves '-c:v hevc' to libx265 by itself.
         stream_audio = next((s for s in js if s.get('codec_type') == 'audio'), {})
         stream_video = next((s for s in js if s.get('codec_type') == 'video'), {})
 
@@ -99,13 +99,13 @@ class FrameToVideo:
                  output_duration: float=1, 
                  file_name_output_video: Union[str, Path]="output.mp4"):
         time_base_denominator = params_video['time_base'].split('/')[1] # cut off "1/"
-        # ringbridge: Das Standbild braucht nicht die Bildrate des Clips.
-        # Es ist ein stehendes Bild - jedes zusaetzliche Frame kostet nur
-        # x265-Rechenzeit. 2 s bei 25 fps sind 50 Bilder in 1440p und
-        # ~10 s Volllast; bei 5 fps sind es 10 Bilder und ~2,8 s.
-        # Waehrend dieser Zeit kommt der Publisher derselben Kamera nicht
-        # zum Senden -> "payload is too short" bei MediaMTX.
-        # None/0 = Bildrate des Clips uebernehmen (Verhalten des Originals).
+        # ringbridge: the still does not need the clip's frame rate. It
+        # is a static image - every extra frame is pure encoder time. 2 s
+        # at 25 fps is 50 frames at 1440p and ~10 s of full load; at 5 fps
+        # it is 10 frames and ~2.8 s. During that window the publisher for
+        # the same camera cannot keep up -> "payload is too short" at
+        # MediaMTX.
+        # None/0 = inherit the clip's frame rate (original behaviour).
         fps_value = CONFIG.get('still_video_fps') or params_video['r_frame_rate']
         
         # Create the ffmpeg parameters list
@@ -114,66 +114,67 @@ class FrameToVideo:
             *COMMON_FFMPEG_ARGS,
             '-loop', '1',
             '-i', image_file_name,
-            # ringbridge: Tonspur nur, wenn der Clip eine hat. Das Original
-            # setzt sie voraus (params_audio['channels']/['sample_rate']) und
-            # scheitert sonst mit KeyError bzw. AssertionError - die Kamera
-            # faellt dann stumm aus, weil das Standbild 0 Byte gross bleibt.
+            # ringbridge: audio only when the clip actually has a track.
+            # The original assumes one (params_audio['channels'] /
+            # ['sample_rate']) and otherwise fails with KeyError or
+            # AssertionError - the camera then drops out silently, because
+            # the still stays 0 bytes.
             *(['-f', 'lavfi',
                '-i', f"anullsrc=channel_layout={params_audio['channels']}"
                      f":sample_rate={params_audio['sample_rate']}"]
               if params_audio else []),
             '-c:v', params_video['codec_name'],
-            # ringbridge: Es wird ein STANDBILD encodiert - Lookahead,
-            # B-Frames und Bewegungssuche sind hier sinnlos, ein schnelles
-            # preset also richtig. NICHT 'ultrafast': x264 erzwingt damit
-            # "Constrained Baseline" und ignoriert ein angegebenes
-            # -profile:v. Da Clip und Standbild im selben -c copy-Concat
-            # landen, weichen dann die profile-level-id im SDP-fmtp
-            # voneinander ab - dieselbe Fehlerklasse wie ein Auflösungs-
-            # oder Tonformat-Konflikt, nur an einem Parameter, auf den
-            # niemand schaut. Gemessen (1080p, 2 s Standbild):
-            #   ultrafast 0,5 s  Constrained Baseline  394 KB
-            #   veryfast  0,9 s  High                  117 KB
-            #   medium    0,7 s  High                  118 KB
-            # ultrafast ist also auch noch dreimal so gross bei zwei
-            # Zehntelsekunden Vorsprung.
+            # ringbridge: this encodes a STILL IMAGE - lookahead, B-frames
+            # and motion search are pointless here, so a fast preset is
+            # right. But NOT 'ultrafast': x264 forces "Constrained
+            # Baseline" with it and ignores any -profile:v you pass. Since
+            # clip and still end up in the same -c copy concat, the
+            # profile-level-id in the SDP fmtp then differs between them -
+            # the same class of bug as a resolution or audio-format
+            # mismatch, just on a parameter nobody looks at.
+            # Measured (1080p, 2 s still):
+            #   ultrafast 0.5 s  Constrained Baseline  394 KB
+            #   veryfast  0.9 s  High                  117 KB
+            #   medium    0.7 s  High                  118 KB
+            # So ultrafast is also three times the size for a two-tenths
+            # of a second lead.
             #
-            # Diese Zeiten taugen NICHT zum Vergleich der Presets
-            # untereinander - der Encode ist so kurz, dass Threadstart
-            # und Rauschen dominieren, weshalb medium scheinbar vor
-            # veryfast liegt. Wo er laenger laeuft, zeigt sich der echte
-            # Abstand: blinkbridge misst bei 1440p/2,0 s medium 4,76 s
-            # gegen veryfast 2,11 s. Die Aussage oben betrifft Profil und
-            # Dateigroesse, nicht die Geschwindigkeit.
+            # Those timings are NOT usable for comparing the presets with
+            # each other - the encode is short enough that thread startup
+            # and noise dominate, which is why medium appears to beat
+            # veryfast. Where the encode runs longer the real gap shows:
+            # blinkbridge measures medium 4.76 s against veryfast 2.11 s at
+            # 1440p / 2.0 s. The statement above is about profile and file
+            # size, not about speed.
             *(['-preset', CONFIG.get('still_video_preset') or 'veryfast']
               if params_video['codec_name'] in ('h264', 'hevc') else []),
             '-pix_fmt', params_video['pix_fmt'],
             '-t', str(output_duration),
             '-vf', f"scale={params_video['width']}:{params_video['height']},fps={fps_value}",
-            # ringbridge: CRF statt der Bitrate des Clips. Ein Standbild
-            # braucht die Datenrate eines Bewegtbilds nicht.
+            # ringbridge: CRF instead of the clip's bitrate. A still does
+            # not need the data rate of moving video.
             #
-            # Zum Nebeneffekt der festen Bitrate: Wird die Bildzahl
-            # gesenkt, KANN die Datei wachsen, weil dasselbe Budget pro
-            # Sekunde auf weniger Bilder verteilt wird. Das gilt aber nur,
-            # wenn die Ratenkontrolle bindet. Bei einem stehenden Bild
-            # liegt der Inhalt oft weit unter dem Budget - dann passiert
-            # nichts dergleichen. Gegenmessung von der blinkbridge-Seite
-            # (1440p, Quelle 2722 kbit/s): 2,0 s -> 285 KB, 0,5 s ->
-            # 156 KB, also kleiner statt groesser. Bei uns hat die
-            # Ratenkontrolle gebunden, dort nicht.
-            # Gemessen (1440p HEVC, 2 s @ 5 fps): mit -b:v 5,7 s / 414 KB,
-            # mit -crf 30 4,7 s / 213 KB. Schneller UND kleiner.
-            # None/0 = Bitrate des Clips (Verhalten des Originals).
+            # On the side effect of a fixed bitrate: if you reduce the
+            # frame count, the file CAN grow, because the same per-second
+            # budget is spread over fewer frames. That only happens when
+            # rate control actually binds, though. For a static image the
+            # content usually sits far below the budget - and then nothing
+            # of the sort occurs. Counter-measurement from the blinkbridge
+            # side (1440p, source 2722 kbit/s): 2.0 s -> 285 KB, 0.5 s ->
+            # 156 KB, i.e. smaller rather than larger. Here rate control
+            # was binding, there it was not.
+            # Measured (1440p HEVC, 2 s @ 5 fps): with -b:v 5.7 s / 414 KB,
+            # with -crf 30 4.7 s / 213 KB. Faster AND smaller.
+            # None/0 = the clip's bitrate (original behaviour).
             *(['-crf', str(CONFIG['still_video_crf'])]
               if CONFIG.get('still_video_crf')
               else ['-b:v', params_video['bit_rate']]),
-            # ringbridge: ffprobe meldet Profilnamen anders, als die Encoder
-            # sie erwarten - gross ("Main") und mit Leerzeichen
-            # ("Constrained Baseline"). x265 lehnt "Main" ab
-            # ("unknown profile <Main>"), x264 kennt kein
-            # "constrained baseline". Deshalb normalisieren; ist der Name
-            # unbekannt, lassen wir die Option lieber weg als zu scheitern.
+            # ringbridge: ffprobe reports profile names differently from
+            # what the encoders expect - capitalised ("Main") and with
+            # spaces ("Constrained Baseline"). x265 rejects "Main"
+            # ("unknown profile <Main>"), x264 does not know "constrained
+            # baseline". Hence the normalisation; if the name is unknown
+            # we drop the option rather than fail.
             *_profile_args(params_video.get('profile')),
             *(['-level:v', str(params_video['level'])]
               if params_video.get('level') not in (None, '', -99) else []),
@@ -201,10 +202,10 @@ class StillVideoCreator:
                  file_name_input_video: Union[str, Path], 
                  output_duration: float=1, 
                  file_name_still_video: Union[str, Path]="output.mp4"):
-        # ringbridge: Ausnahmen im Thread gingen verloren - wait() kehrte
-        # normal zurueck, und der Aufrufer hielt ein 0-Byte-Standbild fuer
-        # gelungen. Genau diese stille Art hat heute zweimal Zeit gekostet
-        # (HEVC-Codec, Profilname). Jetzt wird sie in wait() erneut geworfen.
+        # ringbridge: exceptions inside the thread used to be lost -
+        # wait() returned normally and the caller took a 0-byte still for
+        # success. Exactly that silent shape cost us time twice (HEVC
+        # codec, profile name). They are now re-raised in wait().
         self._error = None
         self.thread = threading.Thread(
             target=self._run_guarded,
@@ -221,11 +222,11 @@ class StillVideoCreator:
              file_name_input_video: Union[str, Path], 
              output_duration: float=1, 
              file_name_still_video: Union[str, Path]="output.mp4") -> None:
-        # ringbridge: Der Name war fest 'last_frame.jpg' - fuer ALLE Kameras
-        # derselbe, benutzt aus je einem Thread pro Kamera. Bei mehreren
-        # Kameras loeschen die sich gegenseitig die Zwischendatei
-        # (FileNotFoundError beim unlink). Ableitung vom Zielvideo macht ihn
-        # eindeutig, denn das ist pro Kamera und Zeitpunkt eindeutig.
+        # ringbridge: the name used to be a fixed 'last_frame.jpg' - the
+        # same one for ALL cameras, used from one thread per camera. With
+        # several cameras they delete each other's intermediate file
+        # (FileNotFoundError on unlink). Deriving it from the target video
+        # makes it unique, since that is unique per camera and timestamp.
         still_image_file_name = Path(file_name_still_video).with_suffix('.jpg')
         lfg = VideoToLastFrame(file_name_input_video, still_image_file_name) # run in background
         params_audio, params_video = StreamParameters(file_name_input_video).wait()
@@ -233,16 +234,16 @@ class StillVideoCreator:
 
         if not params_video:
             raise RuntimeError(
-                f"kein Videostream in {file_name_input_video} gefunden")
+                f"no video stream found in {file_name_input_video}")
         if not params_audio:
-            log.info(f"{Path(file_name_input_video).name}: keine Tonspur - "
-                     f"Standbild wird ohne Ton erzeugt")
+            log.info(f"{Path(file_name_input_video).name}: no audio track - "
+                     f"building the still without audio")
 
-        # ringbridge: try/finally - die Zwischendatei wurde nur im
-        # Erfolgsfall geloescht. Scheitert das Encodieren, blieb sie liegen
-        # (am 2026-08-30 mehrfach beobachtet, je 170 KB, nach den
-        # HEVC- und Profilnamen-Fehlschlaegen). missing_ok, weil der
-        # Fehler auch vor dem Erzeugen aufgetreten sein kann.
+        # ringbridge: try/finally - the intermediate file used to be
+        # deleted only on success. When the encode failed it was left
+        # behind (observed repeatedly on 2026-08-30, 170 KB each, after
+        # the HEVC and profile-name failures). missing_ok, because the
+        # error can also occur before the file is even created.
         try:
             FrameToVideo(still_image_file_name, params_video, params_audio,
                          output_duration=output_duration,

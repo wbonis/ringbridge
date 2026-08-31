@@ -1,18 +1,18 @@
 """
-MQTT-Ausgabe fuer ringbridge.
+MQTT output for ringbridge.
 
-Ring liefert im Push mehr, als in den Stream passt: einen von Ring's LLM
-geschriebenen Beschreibungssatz, die Klassifikation (human/other_motion)
-und eine Snapshot-URL. In der History-API fehlt all das (dort sind
-`short_description`/`full_description` durchgaengig `null`).
+The Ring push carries more than fits into the stream: a description
+sentence written by Ring's LLM, the classification (human/other_motion)
+and a snapshot URL. None of that is available through the history API,
+where `short_description`/`full_description` are consistently `null`.
 
-Das hier veroeffentlicht diese Angaben nach MQTT, damit Home Assistant
-sie neben den Frigate-Kameras anzeigen kann. Bewusst **nicht** unter
-`frigate/...` - das gehoert Frigate. Eigener Praefix, plus optionale
-HA-Discovery, damit die Entitaeten von selbst entstehen.
+This publishes those details to MQTT so Home Assistant can show them
+alongside the Frigate cameras. Deliberately **not** under `frigate/...` -
+that namespace belongs to Frigate. Own prefix, plus optional Home
+Assistant discovery so the entities appear by themselves.
 
-Faellt MQTT aus, laeuft der Rest von ringbridge unveraendert weiter:
-alle Fehler werden geschluckt und nur geloggt.
+If MQTT is unavailable, the rest of ringbridge carries on unchanged: every
+error here is caught and only logged.
 """
 
 import json
@@ -24,11 +24,16 @@ from ringbridge.config import *
 
 log = logging.getLogger(__name__)
 
-# Felder, die je Kamera veroeffentlicht werden.
+# Fields published per camera.
 FIELDS = ('description', 'title', 'detection', 'snapshot_url', 'timestamp')
 
-# Nur diese bekommen eine HA-Discovery-Entitaet; snapshot_url und
-# timestamp sind Attribute, keine eigenen Sensoren.
+# Only these get a Home Assistant discovery entity; snapshot_url and
+# timestamp are attributes, not sensors of their own.
+#
+# NOTE: the labels are the entity names Home Assistant derives its entity
+# IDs from. Changing them creates NEW entities and leaves the old ones
+# unavailable, breaking any automation that referenced them. They are
+# therefore left as-is rather than translated along with the code.
 DISCOVERY_FIELDS = {
     'description': ('Beschreibung', 'mdi:text-short'),
     'detection':   ('Erkennung',    'mdi:motion-sensor'),
@@ -50,13 +55,13 @@ class MqttPublisher:
 
     def start(self) -> None:
         if not self.enabled:
-            log.info("MQTT deaktiviert (mqtt.enabled = false)")
+            log.info("MQTT disabled (mqtt.enabled = false)")
             return
 
         try:
             import paho.mqtt.client as mqtt
         except ImportError:
-            log.error("paho-mqtt nicht installiert - MQTT bleibt aus")
+            log.error("paho-mqtt not installed - continuing without MQTT")
             self.enabled = False
             return
 
@@ -69,7 +74,7 @@ class MqttPublisher:
             if user:
                 client.username_pw_set(user, self._cfg.get('password'))
 
-            # Letzter Wille: HA sieht, wenn die Bruecke weg ist.
+            # Last will, so HA can see when the bridge goes away.
             availability = f"{self.prefix}/status"
             client.will_set(availability, "offline", retain=True)
 
@@ -80,10 +85,10 @@ class MqttPublisher:
             client.publish(availability, "online", retain=True)
 
             self.client = client
-            log.info(f"MQTT verbunden mit {self._cfg.get('host')}:"
-                     f"{self._cfg.get('port', 1883)}, Praefix '{self.prefix}'")
+            log.info(f"MQTT connected to {self._cfg.get('host')}:"
+                     f"{self._cfg.get('port', 1883)}, prefix '{self.prefix}'")
         except Exception as e:
-            log.error(f"MQTT-Verbindung fehlgeschlagen ({e}) - laeuft ohne MQTT weiter")
+            log.error(f"MQTT connection failed ({e}) - continuing without MQTT")
             self.client = None
             self.enabled = False
 
@@ -95,13 +100,13 @@ class MqttPublisher:
             self.client.loop_stop()
             self.client.disconnect()
         except Exception as e:
-            log.debug(f"MQTT-Stop: {e}")
+            log.debug(f"MQTT stop: {e}")
         self.client = None
 
     # ------------------------------------------------------------------
 
     def _announce(self, camera_key: str, camera_name: str) -> None:
-        """HA-Discovery je Kamera - einmal pro Laufzeit."""
+        """Home Assistant discovery per camera - once per run."""
         if not self.discovery or camera_key in self._announced:
             return
 
@@ -127,14 +132,14 @@ class MqttPublisher:
             self.client.publish(topic, json.dumps(payload), retain=True)
 
         self._announced.add(camera_key)
-        log.info(f"MQTT: Discovery fuer {camera_name} veroeffentlicht")
+        log.info(f"MQTT: discovery published for {camera_name}")
 
     def publish_event(self, camera_key: str, camera_name: str, values: dict) -> None:
         """
-        Ein Ring-Push-Ereignis veroeffentlichen.
+        Publish one Ring push event.
 
-        `camera_key` ist der bereinigte Name (wie im RTSP-Pfad), damit die
-        Themen zu den Frigate-Kameranamen passen.
+        `camera_key` is the sanitised name (as used in the RTSP path), so
+        the topics line up with the Frigate camera names.
         """
         if self.client is None:
             return
@@ -154,6 +159,6 @@ class MqttPublisher:
                                     json.dumps(values, ensure_ascii=False),
                                     retain=True)
 
-            log.debug(f"MQTT: {camera_name} veroeffentlicht")
+            log.debug(f"MQTT: published {camera_name}")
         except Exception as e:
-            log.error(f"MQTT-Veroeffentlichung fehlgeschlagen: {e}")
+            log.error(f"MQTT publish failed: {e}")

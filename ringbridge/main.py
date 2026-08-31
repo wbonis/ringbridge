@@ -27,11 +27,12 @@ class Application:
         log.debug(f"{camera_name}: getting latest clip")
         file_name_initial_video = await self.cam_manager.save_latest_clip(camera_name, force=redownload)
 
-        # ringbridge: Ohne Startvideo darf kein StreamServer gebaut werden -
-        # das None wanderte sonst bis in subprocess.Popen (TypeError) und
-        # hinterliess einen "laufenden" Server ohne Concat-Dateien.
+        # ringbridge: without an initial video no StreamServer may be
+        # built - the None otherwise travelled all the way into
+        # subprocess.Popen (TypeError) and left behind a "running" server
+        # with no concat files.
         if file_name_initial_video is None:
-            log.warning(f"{camera_name}: kein Clip verfuegbar, Stream wird nicht gestartet")
+            log.warning(f"{camera_name}: no clip available, stream not started")
             return None
 
         log.info(f"{camera_name}: starting stream server")
@@ -78,13 +79,13 @@ class Application:
             ss.failure_count = 0
             ss.datetime_started = datetime.now()
 
-        # ringbridge: Frigate-Schnipsel schreiben, sobald die Streams stehen -
-        # dann sind die Clips da und die Aufloesungen bekannt.
+        # ringbridge: write the Frigate snippet once the streams are up -
+        # by then the clips exist and the resolutions are known.
         try:
             export_frigate_snippet(
                 [ss.stream_name_sanitized for ss in self.stream_servers.values()])
         except Exception as e:
-            log.warning(f"Frigate-Schnipsel nicht erzeugt: {e}")
+            log.warning(f"Frigate snippet not generated: {e}")
 
         log.info(f"monitoring cameras for motion")
         while self.running:
@@ -116,7 +117,7 @@ class Application:
                     # create new stream server
                     ss_new = await self.start_stream(camera_name, redownload=True)
                     if ss_new is None:
-                        # Kein Clip abrufbar: Versuch zaehlen, spaeter erneut.
+                        # No clip retrievable: count the attempt, retry later.
                         ss.failure_count += 1
                         ss.datetime_started = datetime.now()
                         continue
