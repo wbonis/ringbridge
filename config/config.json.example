@@ -6,6 +6,8 @@
   "snapshot_refresh": {
     "enabled": true,
     "default_interval_minutes": 0,
+    "retries": 15,
+    "delay_seconds": 2,
     "per_camera": {
       "Ring camera name": 15
     }

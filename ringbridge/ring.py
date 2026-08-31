@@ -117,7 +117,7 @@ DEFAULT_SNAPSHOT_REFRESH_MINUTES = 0
 # one camera returned nothing after 3.5s and a 24 KB picture after 21.6s.
 # A camera that just delivered will not deliver again straight away, so
 # failures stay normal however long the window is.
-DEFAULT_SNAPSHOT_RETRIES = 10
+DEFAULT_SNAPSHOT_RETRIES = 15
 DEFAULT_SNAPSHOT_DELAY_SECONDS = 2
 
 
@@ -147,6 +147,8 @@ class CameraManager:
         # and the bytes last received, per camera.
         self._snapshot_at = defaultdict(float)
         self._last_snapshot = {}
+        self._snapshot_task = {}
+        self._snapshot_window = {}
 
     # ------------------------------------------------------------------ auth
 
@@ -427,12 +429,12 @@ class CameraManager:
 
             kind = entry.get('kind')
             if kind not in kinds:
-                log.debug(f"{dev.name}: ueberspringe {entry.get('id')} (kind={kind})")
+                log.debug(f"{dev.name}: skipping {entry.get('id')} (kind={kind})")
                 continue
 
             duration = entry.get('duration') or 0
             if max_seconds and duration > max_seconds:
-                log.warning(f"{dev.name}: ueberspringe {entry.get('id')} "
+                log.warning(f"{dev.name}: skipping {entry.get('id')} "
                             f"(kind={kind}, {duration:.0f}s > {max_seconds}s)")
                 continue
 
@@ -639,16 +641,38 @@ class CameraManager:
         Returns the path to a JPEG, or None. The caller turns it into a
         still; this only deals with fetching.
 
+        The request does NOT block the caller. async_get_snapshot() polls
+        Ring for up to retries*delay seconds - 30 s by default - and the
+        motion loop awaits every camera in turn, so waiting here would stall
+        motion detection and the stream watchdog for up to two minutes per
+        round. Instead the request runs as a task and the result is picked
+        up on a later tick, a few seconds later. Nothing that touches the
+        concat files moves off the loop.
+
         Two details that are load-bearing rather than cosmetic:
 
         - The attempt timestamp is written BEFORE the request, not after a
           success. Otherwise a camera that never delivers is retried on
           every loop tick - here that would be every few seconds, forever.
-          Not hypothetical: three of four cameras on this account return
-          0 bytes, because only the newer models support it.
+          Not hypothetical: one of four cameras on this account delivers
+          nothing even with a 30 s window.
         - Identical bytes are skipped. Re-encoding the still from a picture
           that did not change costs seconds of CPU for no change on screen.
         """
+        # A request from an earlier tick is either still running or has a
+        # result waiting. Single-flight: never two per camera.
+        task = self._snapshot_task.get(camera_name)
+        if task is not None:
+            if not task.done():
+                return None
+
+            self._snapshot_task.pop(camera_name, None)
+            try:
+                return self._store_snapshot(camera_name, task.result())
+            except Exception as e:
+                log.debug(f"{camera_name}: snapshot failed ({e})")
+                return None
+
         interval = self._snapshot_interval(camera_name)
         if not interval:
             return None
@@ -667,19 +691,21 @@ class CameraManager:
         cfg = CONFIG.get('snapshot_refresh') or {}
         retries = int(cfg.get('retries', DEFAULT_SNAPSHOT_RETRIES))
         delay = int(cfg.get('delay_seconds', DEFAULT_SNAPSHOT_DELAY_SECONDS))
+        self._snapshot_window[camera_name] = retries * delay
 
-        try:
-            data = await dev.async_get_snapshot(retries=retries, delay=delay)
-        except Exception as e:
-            log.debug(f"{camera_name}: snapshot failed ({e})")
-            return None
+        self._snapshot_task[camera_name] = asyncio.create_task(
+            dev.async_get_snapshot(retries=retries, delay=delay))
+        return None
 
+    def _store_snapshot(self, camera_name: str, data) -> Union[Path, None]:
+        """Write a fetched snapshot to disk; None if there is nothing new."""
         if not data:
-            # Not a missing capability - the earlier wording claimed that and
-            # was wrong. Ring simply produced no snapshot newer than the
-            # request inside the window.
+            # Not a missing capability - an earlier wording claimed that and
+            # was wrong, which sent the investigation down three dead ends.
+            # Ring simply produced no snapshot newer than the request inside
+            # the window.
             log.debug(f"{camera_name}: no snapshot newer than the request "
-                      f"within {retries * delay}s")
+                      f"within {self._snapshot_window.get(camera_name)}s")
             return None
 
         if self._last_snapshot.get(camera_name) == data:
@@ -699,7 +725,18 @@ class CameraManager:
         return path
 
     def note_clip_added(self, camera_name: str) -> None:
-        """A real clip wins: restart the snapshot interval."""
+        """
+        A real clip wins: restart the snapshot interval.
+
+        Not for the first clip after a start, though. Seeding downloads the
+        latest cloud recording, which the first history check then reports
+        as new - and that recording can be hours old. Treating it as fresh
+        postponed the first snapshot by a full interval on every restart,
+        so a run of restarts meant no refresh ever happened. `_snapshot_at`
+        is still 0 exactly until the first attempt, which is the tell.
+        """
+        if not self._snapshot_at[camera_name]:
+            return
         self._snapshot_at[camera_name] = time.time()
 
     async def refresh_metadata(self) -> None:
@@ -836,7 +873,7 @@ async def test() -> None:
     cm = CameraManager()
     await cm.start()
 
-    print("Kameras:", list(cm.get_cameras()))
+    print("Cameras:", list(cm.get_cameras()))
     for camera in cm.get_cameras():
         print(camera, "->", await cm.save_latest_clip(camera))
 
