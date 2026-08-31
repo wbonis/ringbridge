@@ -55,6 +55,17 @@ class StreamServer:
             # choice anyway: over UDP the I-frames of high-resolution
             # cameras get torn apart.
             '-rtsp_transport', 'tcp',
+            # ringbridge: stay under MediaMTX's 1440-byte RTP limit. ffmpeg
+            # defaults to 1472, so MediaMTX logged "RTP packets are too big
+            # (1460 > 1440), remuxing them into smaller ones" on every path
+            # and then produced "payload is too short" errors - but only
+            # while a CLIP was playing, never during the still. A still is
+            # small and regular; a 1080p clip's I-frames are neither, so the
+            # oversized packets and the remuxing only bite there. Measured
+            # 2026-08-31: 121 errors in three minutes on one camera, timed to
+            # its clip, and 3435 in five seconds on another. Both settled the
+            # moment the still came back.
+            '-pkt_size', '1200',
             '-f', 'rtsp',
             # '-avoid_negative_ts', '1',
             # '-use_wallclock_as_timestamps', '1',
