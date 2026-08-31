@@ -17,7 +17,7 @@ class StreamServer:
     def __init__(self, stream_name: str):
         self.stream_name = stream_name
         # ringbridge: also ASCII-fold the name - Ring cameras are called
-        # things like "Camera B", and non-ASCII characters in an RTSP path
+        # things like "Café 2", and non-ASCII characters in an RTSP path
         # only cause trouble.
         # If a different name is configured for this camera
         # (ring.camera_names), that one wins - and it wins everywhere:

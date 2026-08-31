@@ -43,7 +43,7 @@ The price: the clip is only available once Ring has transcoded it. Expect
 | `frigate_export.py` | **new** — generates a Frigate camera config snippet |
 | `main.py` | from blinkbridge; imports, `CONFIG['blink']` -> `CONFIG['ring']`, handling for "no clip available" |
 | `ffmpeg.py` | from blinkbridge; codec-agnostic stream selection (Ring mixes H.264 and HEVC), profile names normalised, per-camera temp file, still with its own frame rate, CRF and preset, audio made optional, worker-thread exceptions re-raised |
-| `stream_server.py` | from blinkbridge; camera names ASCII-folded (`Camera B` -> `camera_b`), `-rtsp_transport tcp` when publishing, orphaned stills swept |
+| `stream_server.py` | from blinkbridge; camera names ASCII-folded (`Café 2` -> `cafe_2`), `-rtsp_transport tcp` when publishing, orphaned stills swept |
 | `config.py` | from blinkbridge; `BLINKBRIDGE_CONFIG` -> `RINGBRIDGE_CONFIG` |
 | `utils.py` | from blinkbridge, unchanged |
 | `Dockerfile` | `python:3.12-slim` instead of `alpine`, `ring_doorbell` instead of `blinkpy` |
