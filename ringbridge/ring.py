@@ -24,6 +24,7 @@ Tested against ring_doorbell 0.9.14.
 """
 
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -149,6 +150,9 @@ class CameraManager:
         self._last_snapshot = {}
         self._snapshot_task = {}
         self._snapshot_window = {}
+        # Metadata of the recording last picked up, for the log line.
+        self._last_entry = {}
+        self._event_summary = {}
 
     # ------------------------------------------------------------------ auth
 
@@ -438,6 +442,7 @@ class CameraManager:
                             f"(kind={kind}, {duration:.0f}s > {max_seconds}s)")
                 continue
 
+            self._last_entry[dev.name] = entry
             return entry.get('id')
 
         return None
@@ -840,6 +845,56 @@ class CameraManager:
 
         return file_name
 
+    def _clip_seconds(self, file_name: Path) -> float:
+        """Real length of the downloaded clip."""
+        try:
+            out = subprocess.run(
+                ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                 '-of', 'csv=p=0', str(file_name)],
+                capture_output=True, text=True, timeout=15)
+            return float(out.stdout.strip())
+        except Exception:
+            return 0.0
+
+    def _format_event(self, camera_name: str, file_name: Path,
+                      seconds: float) -> str:
+        """
+        One-line description of the recording just picked up.
+
+        Ring's own `duration` field is NOT used: it reported 120.0 for a clip
+        that measured 48.7 s, so it is a nominal window rather than a length.
+        The filter in _last_ready_recording_id still uses it as a coarse
+        brake, but anything shown here is measured.
+        """
+        entry = self._last_entry.get(camera_name) or {}
+        parts = []
+
+        if entry.get('id'):
+            parts.append(f"id {entry['id']}")
+
+        created = entry.get('created_at')
+        if created:
+            age = (datetime.datetime.now(datetime.timezone.utc)
+                   - created).total_seconds()
+            parts.append(f"event {created:%H:%M:%S}Z +{age:.0f}s")
+
+        if seconds:
+            parts.append(f"{seconds:.1f}s")
+        try:
+            parts.append(f"{file_name.stat().st_size / 1e6:.1f}MB")
+        except OSError:
+            pass
+
+        cv = entry.get('cv_properties') or {}
+        if cv.get('detection_type'):
+            parts.append(str(cv['detection_type']))
+
+        return f" ({', '.join(parts)})" if parts else ""
+
+    def event_summary(self, camera_name: str) -> str:
+        """Description of the last recording; empty once consumed."""
+        return self._event_summary.pop(camera_name, "")
+
     async def check_for_motion(self, camera_name: str) -> Union[Path, None]:
         """New cloud recording? Then download it and return the path."""
         self.frigate.process()
@@ -869,6 +924,10 @@ class CameraManager:
         self.camera_last_record[camera_name] = recording_id
         # Recording is in - close the push window for this camera.
         self._push_at.pop(camera_name, None)
+
+        seconds = await asyncio.to_thread(self._clip_seconds, file_name)
+        self._event_summary[camera_name] = self._format_event(
+            camera_name, file_name, seconds)
 
         # Frigate will shortly create an event from the spliced clip -
         # that is where Ring's description should go.

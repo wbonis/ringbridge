@@ -75,7 +75,8 @@ class Application:
             await self._maybe_refresh_still(camera_name, ss)
             return False
 
-        log.info(f"{ss.stream_name}: motion detected, adding video")
+        log.info(f"{ss.stream_name}: motion detected, adding video"
+                 f"{self.cam_manager.event_summary(camera_name)}")
         ss.add_video(file_name_new_clip)
         # A real clip wins - restart the snapshot interval, otherwise a
         # refresh due a minute later would replace a genuinely fresh still.
