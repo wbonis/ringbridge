@@ -30,13 +30,15 @@ FIELDS = ('description', 'title', 'detection', 'snapshot_url', 'timestamp')
 # Only these get a Home Assistant discovery entity; snapshot_url and
 # timestamp are attributes, not sensors of their own.
 #
-# NOTE: the labels are the entity names Home Assistant derives its entity
-# IDs from. Changing them creates NEW entities and leaves the old ones
-# unavailable, breaking any automation that referenced them. They are
-# therefore left as-is rather than translated along with the code.
+# The label is only the friendly name. The entity's identity comes from
+# unique_id, which is built from the FIELD name below, so renaming a label
+# updates the display name and keeps the entity - existing automations are
+# unaffected. Note that Home Assistant does not rename an entity_id that
+# was already derived from an older label; only a fresh entity picks up the
+# new wording.
 DISCOVERY_FIELDS = {
-    'description': ('Beschreibung', 'mdi:text-short'),
-    'detection':   ('Erkennung',    'mdi:motion-sensor'),
+    'description': ('Description', 'mdi:text-short'),
+    'detection':   ('Detection',   'mdi:motion-sensor'),
 }
 
 
