@@ -41,6 +41,7 @@ from ring_doorbell import (Auth, Ring, Requires2FAError, AuthenticationError,
                            RingEventListener)
 
 from ringbridge.config import *
+from ringbridge.ffmpeg import StreamParameters
 from ringbridge.mqtt import MqttPublisher
 from ringbridge.frigate import FrigateAnnotator
 
@@ -75,6 +76,18 @@ DEFAULT_MAX_CLIP_SECONDS = 180
 # -profile:v. The transcoded clip would then carry a different profile from
 # everything else - see the comment in ffmpeg.py.
 TRANSCODE_PRESET = 'veryfast'
+
+# ffmpeg encoder name -> the codec_name ffprobe reports for the result.
+# Used only to compare an existing clip against the transcode spec. An
+# encoder that is not listed counts as "cannot verify", and the clip is
+# left alone - re-encoding on every start would be worse than the
+# mismatch this guards against.
+ENCODER_CODEC_NAMES = {
+    'libx264': 'h264', 'h264': 'h264',
+    'h264_qsv': 'h264', 'h264_vaapi': 'h264', 'h264_nvenc': 'h264',
+    'libx265': 'hevc', 'hevc': 'hevc',
+    'hevc_qsv': 'hevc', 'hevc_vaapi': 'hevc', 'hevc_nvenc': 'hevc',
+}
 
 # Push channel (FCM). After a push, the finished recording is polled for
 # on every loop tick for this long - Ring still needs time to transcode
@@ -500,6 +513,48 @@ class CameraManager:
         os.replace(tmp_name, file_name)
         return True
 
+    def _clip_matches_spec(self, camera_name: str, file_name: Path) -> bool:
+        """
+        Does a clip found on disk already have what the transcode spec asks
+        for?
+
+        A clip this run downloaded went through _transcode. One left over
+        from an earlier run may predate the spec, and that matters more
+        than it looks: the seed clip is what the still is built from, and
+        the first still is what fixes the stream's SDP. Every later still
+        is spliced in with `-c copy`, so a stale seed makes the SDP
+        disagree with the content for the whole life of the stream -
+        visible as MediaMTX logging `invalid NALU` and `payload is too
+        short`, and not self-correcting.
+
+        Unverifiable counts as matching; see ENCODER_CODEC_NAMES.
+        """
+        spec = (CONFIG['ring'].get('transcode') or {}).get(camera_name)
+        if not spec:
+            return True
+
+        try:
+            _, video = StreamParameters(str(file_name)).wait()
+        except Exception as e:
+            log.debug(f"{camera_name}: clip parameters unreadable ({e}) - "
+                      f"leaving the clip as it is")
+            return True
+
+        wanted = ENCODER_CODEC_NAMES.get(spec.get('codec', 'libx264'))
+        if wanted and video.get('codec_name') != wanted:
+            log.info(f"{camera_name}: existing clip is "
+                     f"{video.get('codec_name')}, the spec asks for {wanted}")
+            return False
+
+        for key in ('width', 'height'):
+            if spec.get(key) and str(video.get(key)) != str(spec[key]):
+                log.info(f"{camera_name}: existing clip is "
+                         f"{video.get('width')}x{video.get('height')}, the "
+                         f"spec asks for {spec.get('width')}x{spec.get('height')}")
+                return False
+
+        return True
+
     def _transcode(self, camera_name: str, file_name: Path) -> None:
         """
         Transcode the clip according to the configured spec.
@@ -671,6 +726,11 @@ class CameraManager:
         file_name = self._clip_path(camera_name)
 
         if file_name.exists() and not force:
+            # Verify rather than trust: this clip seeds the stream, so its
+            # parameters become the SDP. Transcoding locally is cheap
+            # compared to a fresh download and needs no cloud session.
+            if not self._clip_matches_spec(camera_name, file_name):
+                await asyncio.to_thread(self._transcode, camera_name, file_name)
             log.debug(f"{camera_name}: skipping download, {file_name} exists")
             return file_name
 

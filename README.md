@@ -101,6 +101,21 @@ violated the failure is rarely obvious: the video geometry still corrects
 itself through the in-band SPS, while audio format and profile come only
 from the SDP and stay wrong for the life of the stream.
 
+The seed clip falls under the same rule, from a direction that is easy to
+miss. `save_latest_clip()` reuses an existing `<camera>_latest.mp4` instead
+of downloading, and the transcode only ever ran inside the download path —
+so a clip left over from before `ring.transcode` was configured went
+straight to the stream. The seed is what fixes the SDP, so every correctly
+transcoded still spliced in afterwards disagreed with it. Observed on
+2026-08-31: MediaMTX announced H265 to its readers while the file in
+`_next.concat` was H264, and logged 2028 `invalid NALU` / `payload is too
+short` warnings on that path against 0 on two others. The asymmetry was
+that we validated what we downloaded and trusted what we found on disk.
+`_clip_matches_spec()` now checks a reused clip against the spec and
+transcodes it locally — no download, no cloud session — if it diverges. An
+encoder it cannot map to a codec name counts as matching, since re-encoding
+on every start would be worse than the mismatch being guarded against.
+
 ## Frigate
 
 `frigate_export` writes a ready-made snippet (default:
