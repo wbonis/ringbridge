@@ -10,10 +10,33 @@ from pathlib import Path
 from datetime import datetime
 from ringbridge.utils import wait_until_file_open
 from ringbridge.config import *
-from ringbridge.ffmpeg import StillVideoCreator
+from ringbridge.ffmpeg import StillVideoCreator, StreamParameters
 
 
 log = logging.getLogger(__name__)
+
+
+# The fields a stale SDP actually mis-describes. Video geometry and
+# profile/level travel in sprop-parameter-sets / profile-level-id, the audio
+# layout in the audio fmtp. Frame rate is deliberately ABSENT: it lives in
+# the timestamps, not the SDP, and ffprobe derives it differently for a clip
+# and for a still built from that clip (343/12 vs 200/7 for the same rate) -
+# comparing it produced a false positive within four minutes on the sibling
+# project. Compare only what the SDP carries.
+SDP_FIELDS = ('width', 'height', 'profile', 'level',
+              'sample_rate', 'channels')
+
+
+def _sdp_shape(file_name: Union[str, Path]):
+    """The SDP-relevant parameters of a file, or None if unreadable."""
+    try:
+        audio, video = StreamParameters(str(file_name)).wait()
+    except Exception as e:
+        log.debug(f"shape of {file_name} not readable ({e})")
+        return None
+    merged = {**{k: video.get(k) for k in ('width', 'height', 'profile', 'level')},
+              **{k: audio.get(k) for k in ('sample_rate', 'channels')}}
+    return {k: str(v) if v is not None else None for k, v in merged.items()}
 
 class StreamServer:
     def __init__(self, stream_name: str):
@@ -33,6 +56,12 @@ class StreamServer:
         self.stream_name_sanitized = _n or 'camera'
         self.current_still_video = None
         self._deferred_still_delete = None
+
+    # Set from the first file enqueued - that file is what the publisher
+    # announces, so it IS the session's SDP. Reset naturally on a stream
+    # restart, since that builds a fresh StreamServer.
+    _published_shape = None
+    _warned_shape = None
 
     def _run_server(self) -> str:
         output_url = f"{RTSP_URL}/{self.stream_name_sanitized}"
@@ -124,7 +153,55 @@ class StreamServer:
         # this so it cannot overwrite a newer clip.
         self._queued_clip = video_file_name
 
+        self._reconcile_published_shape(video_file_name)
+
         return next_concat
+
+    def _reconcile_published_shape(self, file_name: Path) -> None:
+        """
+        Warn when a file entering the concat no longer matches the shape the
+        publisher announced.
+
+        Every file reaches the concat through _enqueue_clip, so checking here
+        covers every entry point by construction - seed, clip, still,
+        deferred swap and snapshot refresh alike. The SDP is fixed for the
+        life of the publisher; content that diverges from it plays, but is
+        mis-described to every reader (measured 2026-08-31: Ring switched a
+        camera's audio from 48 to 16 kHz between recordings and the first
+        mismatched clip produced 4846 depacketization errors).
+
+        Ingest normalisation should make this unreachable. It exists for the
+        one path normalisation leaves open: _transcode keeps the ORIGINAL
+        clip when ffmpeg fails, deliberately - better a mismatched clip than
+        none - and that clip then enters the stream silently. Warn only, no
+        automatic restart: a teardown is a heavy answer, and per the sibling
+        project's experience an auto-repair loop for a state that should not
+        occur has a restart loop as its failure mode.
+        """
+        shape = _sdp_shape(file_name)
+        if shape is None:
+            return
+
+        if self._published_shape is None:
+            self._published_shape = shape
+            log.debug(f"{self.stream_name}: published shape {shape}")
+            return
+
+        if shape == self._published_shape:
+            self._warned_shape = None
+            return
+
+        if shape == self._warned_shape:
+            return    # already reported this exact divergence
+
+        diff = ", ".join(
+            f"{k} {self._published_shape.get(k)} -> {shape.get(k)}"
+            for k in SDP_FIELDS
+            if shape.get(k) != self._published_shape.get(k))
+        log.warning(f"{self.stream_name}: stream shape changed ({diff}) - "
+                    f"content plays but the SDP mis-describes it; restart "
+                    f"this stream to republish ({file_name.name})")
+        self._warned_shape = shape
 
     def add_video(self, file_name_input_video: Union[str, Path], still_only: bool=False) -> None:
         if not still_only:
