@@ -784,6 +784,39 @@ class CameraManager:
             # compared to a fresh download and needs no cloud session.
             if not self._clip_matches_spec(camera_name, file_name):
                 await asyncio.to_thread(self._transcode, camera_name, file_name)
+
+            # Mark where this run starts from. camera_last_record lives only in
+            # memory and the download below is the only other place that sets
+            # it, so reusing an existing clip left it unset: the first history
+            # check then reported the newest recording as new and replayed it
+            # into the stream, on every single restart. Frigate recorded those
+            # as fresh events - old footage under a current timestamp.
+            # Measured 2026-08-31: the four clips replayed at one startup were
+            # 7, 19 and 26 minutes old, and the fourth camera had had no event
+            # at all in three hours.
+            #
+            # A history query, not a download. A download is a Ring cloud
+            # session, and those are what we are careful with. The price is
+            # that a recording made while ringbridge was down counts as
+            # handled and is not spliced in; the still then stays on the
+            # previous event until the next one, which snapshot_refresh
+            # covers. One possibly missed event per restart is a better trade
+            # than four certain false ones every restart.
+            #
+            # Note this marks the newest READY recording. One that Ring is
+            # still finalising is not marked and comes through normally a
+            # moment later - correct rather than a gap: that is a genuinely
+            # recent event, not the stale clip this guards against. Seen on
+            # 2026-08-31, a recording from 1.7 min before startup, announced
+            # by a push seconds after the streams came up.
+            dev = self._device(camera_name)
+            if dev is not None:
+                recording_id = await self._last_ready_recording_id(dev)
+                if recording_id is not None:
+                    self.camera_last_record[camera_name] = recording_id
+                    log.debug(f"{camera_name}: starting from recording "
+                              f"{recording_id}, not replaying it")
+
             log.debug(f"{camera_name}: skipping download, {file_name} exists")
             return file_name
 
