@@ -42,8 +42,16 @@ class Application:
         # subprocess.Popen (TypeError) and left behind a "running" server
         # with no concat files.
         if file_name_initial_video is None:
-            log.warning(f"{camera_name}: no clip available, stream not started")
-            return None
+            # Pattern from blinkbridge (aligned 2026-09-01): no seed does
+            # not mean no stream. Frigate gets a text card saying why
+            # there is no picture yet; the poll loop replaces it with the
+            # first real recording.
+            log.warning(f"{camera_name}: no clip available - starting "
+                        f"placeholder stream")
+            return self._start_placeholder(camera_name, [
+                'kein Clip aus der Ring-Cloud verfügbar',
+                'Stream startet mit der nächsten Aufnahme',
+                f'seit {datetime.now():%H:%M}'])
 
         log.info(f"{camera_name}: starting stream server")
         stream_server = StreamServer(camera_name)
@@ -55,15 +63,40 @@ class Application:
             stream_server.start_server(file_name_initial_video)
         except Exception as e:
             log.error(f"{camera_name}: stream server failed to start ({e}) "
-                      f"- camera skipped until the next restart")
+                      f"- starting placeholder stream")
             try:
                 stream_server.close()
             except Exception:
                 pass
-            return None
+            # The broken clip usually still probes fine, so the card can
+            # be built in the camera's real shape and the next clip can be
+            # spliced in without a publisher restart.
+            err = str(e).strip().splitlines()[0][:70]
+            return self._start_placeholder(camera_name, [
+                'letzter Clip defekt - warte auf nächste Aufnahme',
+                err,
+                f'seit {datetime.now():%H:%M}',
+            ], reference_video=file_name_initial_video)
         self.stream_servers[camera_name] = stream_server
 
         return stream_server
+
+    def _start_placeholder(self, camera_name: str, info_lines,
+                           reference_video=None) -> StreamServer:
+        ss = StreamServer(camera_name)
+        try:
+            ss.start_server_placeholder([camera_name, *info_lines],
+                                        reference_video)
+        except Exception as e:
+            log.error(f"{camera_name}: placeholder stream failed too ({e}) "
+                      f"- camera skipped until the next restart")
+            try:
+                ss.close()
+            except Exception:
+                pass
+            return None
+        self.stream_servers[camera_name] = ss
+        return ss
 
     async def check_for_motion(self, camera_name: str) -> bool:
         ss = self.stream_servers[camera_name]
@@ -89,9 +122,29 @@ class Application:
             await self._maybe_refresh_still(camera_name, ss)
             return False
 
+        if ss.placeholder and not ss.placeholder_shape_known:
+            # The card was built in the fallback shape - the SDP does not
+            # match this clip, so an in-place splice would feed wrongly
+            # announced packets. One publisher restart around the first
+            # real clip fixes the SDP for good; Frigate reconnects once.
+            log.info(f"{camera_name}: first clip after fallback-shape "
+                     f"placeholder - restarting the stream with real "
+                     f"parameters{self.cam_manager.event_summary(camera_name)}")
+            ss.close()
+            ss_new = StreamServer(camera_name)
+            ss_new.failure_count = ss.failure_count
+            ss_new.datetime_started = datetime.now()
+            ss_new.start_server(file_name_new_clip)
+            self.stream_servers[camera_name] = ss_new
+            self.cam_manager.note_clip_added(camera_name)
+            return True
+
         log.info(f"{ss.stream_name}: motion detected, adding video"
                  f"{self.cam_manager.event_summary(camera_name)}")
         ss.add_video(file_name_new_clip)
+        if ss.placeholder:
+            ss.placeholder = False
+            log.info(f"{camera_name}: live footage replaces the placeholder")
         # A real clip wins - restart the snapshot interval, otherwise a
         # refresh due a minute later would replace a genuinely fresh still.
         self.cam_manager.note_clip_added(camera_name)

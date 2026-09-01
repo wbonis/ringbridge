@@ -107,6 +107,87 @@ class VideoToLastFrame:
         if self.process.returncode != 0:
             raise Exception("ffmpeg failed to extract the last frame: " + err.decode('utf-8'))
         
+_TILE_FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+_TILE_FONT_BOLD = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+
+
+def _drawtext_escape(text: str) -> str:
+    """
+    Escape for a drawtext text='...' value (expansion=none is set).
+
+    The quotes do NOT protect ':' - the filtergraph parser strips them
+    before the option parser splits on colons, so an unescaped ':' in the
+    text (a clock time, say) breaks parsing mid-string. Seen first try.
+    ffmpeg's own quotes are sidestepped by turning them typographic.
+    """
+    return (text.replace('\\', '\\\\')
+                .replace(':', '\\:')
+                .replace("'", "’"))
+
+
+class TextTile:
+    """
+    Render a text card as a JPEG - the picture for placeholder streams.
+
+    Adopted from blinkbridge's placeholder screens (aligned 2026-09-01):
+    a camera without a usable seed clip publishes a generated card instead
+    of not existing at all. The card carries the camera name plus a line
+    saying WHY there is no picture yet - per user request not just
+    "Starting...".
+
+    Only the image: turning it into a still video goes through the same
+    FrameToVideo as every snapshot, so codec/profile/audio stay consistent
+    with the rest of the stream.
+    """
+    def __init__(self, output_image: Union[str, Path],
+                 width: int, height: int, lines):
+        # First line = title (bold, larger), the rest smaller below it.
+        filters = []
+        title_size = max(height // 12, 16)
+        line_size = max(height // 22, 12)
+        y = 0.32
+        for i, line in enumerate(lines):
+            bold = i == 0
+            filters.append(
+                "drawtext=fontfile={font}:text='{text}':expansion=none"
+                ":fontcolor={color}:fontsize={size}"
+                ":x=(w-text_w)/2:y=h*{y:.3f}".format(
+                    font=_TILE_FONT_BOLD if bold else _TILE_FONT,
+                    text=_drawtext_escape(str(line)),
+                    color='white' if bold else '0xbbbbbb',
+                    size=title_size if bold else line_size,
+                    y=y))
+            y += 0.14 if bold else 0.08
+
+        ffmpeg_params = [
+            'ffmpeg',
+            *COMMON_FFMPEG_ARGS,
+            '-f', 'lavfi',
+            '-i', f'color=c=0x2b2b2b:s={width}x{height}',
+            '-frames:v', '1',
+            '-update', '1',
+            '-vf', ','.join(filters),
+            # Same reasoning as VideoToLastFrame: the mjpeg encoder wants
+            # full-range input.
+            '-pix_fmt', 'yuvj420p',
+            '-q:v', '2',
+            str(output_image)
+        ]
+
+        self.output_image = Path(output_image)
+        self.process = subprocess.Popen(ffmpeg_params, stdout=sys.stdout,
+                                        stderr=subprocess.PIPE)
+
+    def wait(self) -> None:
+        out, err = self.process.communicate()
+        if self.process.returncode != 0:
+            raise Exception("ffmpeg failed to render the text tile: "
+                            + err.decode('utf-8'))
+        if not self.output_image.exists():
+            raise RuntimeError(f"text tile {self.output_image} was not "
+                               f"written despite ffmpeg exiting 0")
+
+
 class FrameToVideo:
     def __init__(self, 
                  image_file_name: Union[str, Path], 

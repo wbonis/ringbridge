@@ -63,6 +63,15 @@ class StreamServer:
         self.stream_name_sanitized = _n or 'camera'
         self.current_still_video = None
         self._deferred_still_delete = None
+        # True while the stream shows a generated text card instead of
+        # camera footage (no usable seed clip). Cleared by the first real
+        # clip; see Application.check_for_motion for the two heal paths.
+        self.placeholder = False
+        # Whether the card was built in the camera's real shape (measured
+        # from a clip on disk) or from the built-in fallback canon. Decides
+        # whether the first real clip can be spliced in-place or needs a
+        # publisher restart to fix the SDP.
+        self.placeholder_shape_known = False
 
     # Set from the first file enqueued - that file is what the publisher
     # announces, so it IS the session's SDP. Reset naturally on a stream
@@ -450,6 +459,78 @@ class StreamServer:
         self.current_still_video = next_still
 
         log.info(f"{self.stream_name}: still refreshed from snapshot")
+
+    # Shape used for a placeholder when the camera has never delivered a
+    # clip to measure. Video mirrors what the Ring cameras here send
+    # (1080p H264 high/4.1); audio is the ingest canon from ring.py, so a
+    # later in-place transition at least keeps the audio format. Values
+    # are strings because FrameToVideo reads ffprobe output, which is
+    # parsed with numbers kept as strings.
+    FALLBACK_PARAMS_VIDEO = {
+        'codec_name': 'h264', 'width': '1920', 'height': '1080',
+        'pix_fmt': 'yuv420p', 'r_frame_rate': '15/1',
+        'time_base': '1/90000', 'profile': 'High', 'level': '41',
+        'bit_rate': '2000000',
+    }
+    FALLBACK_PARAMS_AUDIO = {'channels': '1', 'sample_rate': '16000'}
+
+    def start_server_placeholder(self, lines,
+                                 reference_video: Union[str, Path, None] = None) -> None:
+        """
+        Publish a generated text card instead of a seed clip.
+
+        Pattern adopted from blinkbridge (aligned 2026-09-01): a camera
+        that cannot be seeded still gets its stream immediately - Frigate
+        sees a picture that says what is wrong - and the normal poll loop
+        drives it to live footage later. Before this, such a camera was
+        skipped and simply did not exist until the next restart.
+
+        `reference_video` is a clip to take the stream shape from (a clip
+        whose still creation failed usually still probes fine). Without
+        one the fallback canon is used and the first real clip triggers a
+        publisher restart instead of an in-place splice.
+        """
+        from ringbridge.ffmpeg import TextTile, FrameToVideo, StreamParameters
+
+        params_audio, params_video = ({}, {})
+        if reference_video is not None:
+            try:
+                params_audio, params_video = StreamParameters(str(reference_video)).wait()
+            except Exception as e:
+                log.warning(f"{self.stream_name}: probing {reference_video} "
+                            f"for the placeholder shape failed ({e}) - "
+                            f"using the fallback shape")
+
+        if params_video:
+            self.placeholder_shape_known = True
+        else:
+            params_video = dict(self.FALLBACK_PARAMS_VIDEO)
+            params_audio = dict(self.FALLBACK_PARAMS_AUDIO)
+            self.placeholder_shape_known = False
+
+        self._sweep_old_stills()
+        self._make_concat_files()
+
+        dt = datetime.now()
+        tile = PATH_VIDEOS / (f"{self.stream_name_sanitized}_still_"
+                              f"{dt.strftime('%Y-%m-%d_%H-%M-%S-%f')}.jpg")
+        still = tile.with_suffix('.mp4')
+
+        TextTile(tile, int(params_video['width']), int(params_video['height']),
+                 lines).wait()
+        FrameToVideo(tile, params_video, params_audio,
+                     output_duration=CONFIG['still_video_duration'],
+                     file_name_output_video=still).wait()
+        if not still.exists() or still.stat().st_size == 0:
+            raise RuntimeError(f"placeholder still {still} came out empty")
+
+        self._enqueue_clip(still)
+        self.current_still_video = still
+        self.placeholder = True
+
+        url = self._run_server()
+        log.info(f"{self.stream_name}: placeholder stream ready at {url} "
+                 f"({'camera shape' if self.placeholder_shape_known else 'fallback shape'})")
 
     def start_server(self, file_name_initial_video: Union[str, Path]) -> None:
         log.debug(f"{self.stream_name}: starting server with {file_name_initial_video}")
