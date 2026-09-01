@@ -224,10 +224,37 @@ class StreamServer:
                     f"this stream to republish ({file_name.name})")
         self._warned_shape = shape
 
-    def add_video(self, file_name_input_video: Union[str, Path], still_only: bool=False) -> None:
+    def _still_timestamp_text(self, source: Union[str, Path, None],
+                              source_time: datetime = None) -> Union[str, None]:
+        """
+        Overlay text for a still, or None when the overlay is off.
+
+        Schema shared with blinkbridge (timestamp_overlay.still/.format,
+        aligned 2026-09-01). Shown is the cloud recording time of the clip
+        the still was taken from, in the container's local timezone; a
+        snapshot-based still carries the fetch time instead. Falls back to
+        the source file's mtime when no event time is known (a clip reused
+        at startup) - that is the download time, close enough.
+        """
+        cfg = CONFIG.get('timestamp_overlay') or {}
+        if not cfg.get('still', False):
+            return None
+        if source_time is None:
+            if source is None:
+                return None
+            try:
+                source_time = datetime.fromtimestamp(Path(source).stat().st_mtime)
+            except OSError:
+                return None
+        if source_time.tzinfo is not None:
+            source_time = source_time.astimezone()
+        return source_time.strftime(cfg.get('format') or '%d.%m.%Y %H:%M:%S')
+
+    def add_video(self, file_name_input_video: Union[str, Path],
+                  still_only: bool=False, source_time: datetime = None) -> None:
         if not still_only:
             # enqueue fullclip immediately
-            self._enqueue_clip(file_name_input_video) 
+            self._enqueue_clip(file_name_input_video)
 
         # make a timestamped name for the next still video
         dt = datetime.now()
@@ -237,7 +264,9 @@ class StreamServer:
         log.debug(f"{self.stream_name}: starting creating next still video {next_still_video}")
         svc = StillVideoCreator(file_name_input_video,
                                 output_duration=CONFIG['still_video_duration'],
-                                file_name_still_video=next_still_video)
+                                file_name_still_video=next_still_video,
+                                timestamp_text=self._still_timestamp_text(
+                                    file_name_input_video, source_time))
         
         # wait for enqueued video to start
         if not still_only:
@@ -440,9 +469,15 @@ class StreamServer:
         next_still = PATH_VIDEOS / (f"{self.stream_name_sanitized}_still_"
                                     f"{dt.strftime('%Y-%m-%d_%H-%M-%S-%f')}.mp4")
 
+        # A snapshot is taken now, so it carries "now" - and it needs the
+        # overlay passed explicitly: this path does not go through
+        # StillVideoCreator, and without it the timestamp silently
+        # disappears between events (blinkbridge hit exactly that).
         FrameToVideo(image_file_name, params_video, params_audio,
                      output_duration=CONFIG['still_video_duration'],
-                     file_name_output_video=next_still).wait()
+                     file_name_output_video=next_still,
+                     timestamp_text=self._still_timestamp_text(
+                         None, datetime.now())).wait()
 
         if not next_still.exists() or next_still.stat().st_size == 0:
             log.warning(f"{self.stream_name}: still refresh produced an "

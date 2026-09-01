@@ -189,12 +189,13 @@ class TextTile:
 
 
 class FrameToVideo:
-    def __init__(self, 
-                 image_file_name: Union[str, Path], 
-                 params_video: Dict, 
-                 params_audio: Dict, 
-                 output_duration: float=1, 
-                 file_name_output_video: Union[str, Path]="output.mp4"):
+    def __init__(self,
+                 image_file_name: Union[str, Path],
+                 params_video: Dict,
+                 params_audio: Dict,
+                 output_duration: float=1,
+                 file_name_output_video: Union[str, Path]="output.mp4",
+                 timestamp_text: str = None):
         time_base_denominator = params_video['time_base'].split('/')[1] # cut off "1/"
         # ringbridge: the still does not need the clip's frame rate. It
         # is a static image - every extra frame is pure encoder time. 2 s
@@ -247,7 +248,18 @@ class FrameToVideo:
               if params_video['codec_name'] in ('h264', 'hevc') else []),
             '-pix_fmt', params_video['pix_fmt'],
             '-t', str(output_duration),
-            '-vf', f"scale={params_video['width']}:{params_video['height']},fps={fps_value}",
+            # Timestamp overlay: schema and look shared with blinkbridge
+            # (aligned 2026-09-01) - fontsize h/22 scales with resolution,
+            # top-left box, cloud recording time in the container's local
+            # timezone. Only the still is tagged: clips are stream-copied
+            # and tagging them would mean a reencode (blinkbridge measured
+            # ~2x realtime on 1440p for that).
+            '-vf', f"scale={params_video['width']}:{params_video['height']},fps={fps_value}"
+                   + (",drawtext=fontfile=" + _TILE_FONT_BOLD
+                      + ":text='" + _drawtext_escape(timestamp_text) + "'"
+                      ":expansion=none:fontcolor=white:fontsize=h/22"
+                      ":box=1:boxcolor=black@0.5:boxborderw=8:x=12:y=12"
+                      if timestamp_text else ""),
             # ringbridge: CRF instead of the clip's bitrate. A still does
             # not need the data rate of moving video.
             #
@@ -295,10 +307,11 @@ class FrameToVideo:
             raise Exception(f"ffmpeg failed to create the video: {err.decode('utf-8')}")
 
 class StillVideoCreator:
-    def __init__(self, 
-                 file_name_input_video: Union[str, Path], 
-                 output_duration: float=1, 
-                 file_name_still_video: Union[str, Path]="output.mp4"):
+    def __init__(self,
+                 file_name_input_video: Union[str, Path],
+                 output_duration: float=1,
+                 file_name_still_video: Union[str, Path]="output.mp4",
+                 timestamp_text: str = None):
         # ringbridge: exceptions inside the thread used to be lost -
         # wait() returned normally and the caller took a 0-byte still for
         # success. Exactly that silent shape cost us time twice (HEVC
@@ -306,7 +319,8 @@ class StillVideoCreator:
         self._error = None
         self.thread = threading.Thread(
             target=self._run_guarded,
-            args=(file_name_input_video, output_duration, file_name_still_video))
+            args=(file_name_input_video, output_duration,
+                  file_name_still_video, timestamp_text))
         self.thread.start()
 
     def _run_guarded(self, *args) -> None:
@@ -315,10 +329,11 @@ class StillVideoCreator:
         except Exception as e:
             self._error = e
 
-    def _run(self, 
-             file_name_input_video: Union[str, Path], 
-             output_duration: float=1, 
-             file_name_still_video: Union[str, Path]="output.mp4") -> None:
+    def _run(self,
+             file_name_input_video: Union[str, Path],
+             output_duration: float=1,
+             file_name_still_video: Union[str, Path]="output.mp4",
+             timestamp_text: str = None) -> None:
         # ringbridge: the name used to be a fixed 'last_frame.jpg' - the
         # same one for ALL cameras, used from one thread per camera. With
         # several cameras they delete each other's intermediate file
@@ -353,7 +368,8 @@ class StillVideoCreator:
         try:
             FrameToVideo(still_image_file_name, params_video, params_audio,
                          output_duration=output_duration,
-                         file_name_output_video=file_name_still_video).wait()
+                         file_name_output_video=file_name_still_video,
+                         timestamp_text=timestamp_text).wait()
         finally:
             still_image_file_name.unlink(missing_ok=True)
         

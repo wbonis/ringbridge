@@ -75,6 +75,13 @@
     }
   },
 
+  "timestamp_overlay": {
+    "_help": "Burns the recording time into the picture, top left (white on half-transparent black, size scales with resolution). Schema shared with blinkbridge. 'still': tag the looping still with the cloud recording time of the clip it was taken from (snapshot-refresh stills carry the snapshot time instead); shown in the container's local timezone. 'clip' exists for parity with blinkbridge but is NOT implemented here and is ignored: ringbridge stream-copies clips, tagging them would mean a reencode (~2x realtime, measured on the blinkbridge side). 'format' is strftime.",
+    "still": false,
+    "clip": false,
+    "format": "%d.%m.%Y %H:%M:%S"
+  },
+
   "still_video_duration": 2.0,
   "still_video_fps": 5,
   "still_video_crf": 30,

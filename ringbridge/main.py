@@ -141,7 +141,8 @@ class Application:
 
         log.info(f"{ss.stream_name}: motion detected, adding video"
                  f"{self.cam_manager.event_summary(camera_name)}")
-        ss.add_video(file_name_new_clip)
+        ss.add_video(file_name_new_clip,
+                     source_time=self.cam_manager.last_event_time(camera_name))
         if ss.placeholder:
             ss.placeholder = False
             log.info(f"{camera_name}: live footage replaces the placeholder")

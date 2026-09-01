@@ -922,6 +922,11 @@ class CameraManager:
         """Description of the last recording; empty once consumed."""
         return self._event_summary.pop(camera_name, "")
 
+    def last_event_time(self, camera_name: str):
+        """Cloud recording time of the camera's last known event (UTC)."""
+        entry = self._last_entry.get(camera_name) or {}
+        return entry.get('created_at')
+
     async def check_for_motion(self, camera_name: str) -> Union[Path, None]:
         """New cloud recording? Then download it and return the path."""
         self.frigate.process()
