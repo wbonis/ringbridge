@@ -80,7 +80,7 @@ TRANSCODE_PRESET = 'veryfast'
 
 # Every clip's audio is normalised to this on ingest, whether or not the
 # camera has a video transcode spec. Ring changes the sample rate of a
-# camera's recordings server-side: buro_2 delivered 48 kHz all day on
+# camera's recordings server-side: one camera delivered 48 kHz all day on
 # 2026-08-31 and switched to 16 kHz between two recordings eleven minutes
 # apart. Audio format lives only in the SDP, so the first mismatched clip
 # produced 4846 "payload is too short" errors in eight seconds - exactly

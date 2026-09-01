@@ -69,7 +69,15 @@ class StreamParameters:
 
 class VideoToLastFrame:
     def __init__(self, input_video: Union[str, Path], output_image: Union[str, Path]):
-        time_offset_from_end = 1.0
+        # 4 s, not 1 s: -sseof is relative to the CONTAINER end, but Ring
+        # clips can have the audio track outlast the video track (measured
+        # 2026-09-01: video ends 48.2 s, container 49.7 s). With -sseof -1
+        # the seek then lands past the last video packet, ffmpeg encodes
+        # zero frames and still EXITS 0 with no output file. Keyframes come
+        # every ~2 s, so 4 s covers track skew plus one GOP. The window only
+        # sets how many trailing frames are decoded; -update 1 keeps the
+        # last one either way.
+        time_offset_from_end = 4.0
 
         ffmpeg_params = [
             'ffmpeg',
@@ -77,8 +85,16 @@ class VideoToLastFrame:
             '-sseof', str(-time_offset_from_end),
             '-i', input_video,
             '-update', '1',
-            '-pix_fmt', 'yuv420p',
-            '-vf', 'scale=out_range=pc',  # HACK
+            # yuvj420p, not yuv420p: the mjpeg encoder wants full-range and
+            # refuses limited-range input under strict compliance ("Non
+            # full-range YUV is non-standard"). The old pairing - limited
+            # pix_fmt against a full-range scale filter - failed on 2 of 267
+            # clips depending on their color_range metadata, and one failing
+            # clip blocks its camera's seed DETERMINISTICALLY on every
+            # restart: measured 2026-09-01, ALL streams stayed down for
+            # minutes because one camera's latest clip kept failing here.
+            '-pix_fmt', 'yuvj420p',
+            '-vf', 'scale=out_range=pc',
             '-q:v', '1',
             output_image
         ]
@@ -231,6 +247,15 @@ class StillVideoCreator:
         lfg = VideoToLastFrame(file_name_input_video, still_image_file_name) # run in background
         params_audio, params_video = StreamParameters(file_name_input_video).wait()
         lfg.wait()
+        # ffmpeg can encode ZERO frames and still exit 0 (seen 2026-09-01:
+        # -sseof past the end of the video track). Without this check the
+        # missing jpg only surfaces as a confusing error from the next
+        # stage - or not at all - and the camera's seed hangs the startup.
+        if not Path(still_image_file_name).exists():
+            raise RuntimeError(
+                f"last-frame extraction of {file_name_input_video} produced "
+                f"no image (ffmpeg exited 0 but wrote nothing - video track "
+                f"shorter than the container?)")
 
         if not params_video:
             raise RuntimeError(

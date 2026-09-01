@@ -47,7 +47,20 @@ class Application:
 
         log.info(f"{camera_name}: starting stream server")
         stream_server = StreamServer(camera_name)
-        stream_server.start_server(file_name_initial_video)  
+        # One camera's seed failing must not take down the other three.
+        # Exactly that happened on 2026-09-01: one clip whose video track
+        # ended 1.5 s before the container broke the still creation and all
+        # four streams stayed down, on every restart, deterministically.
+        try:
+            stream_server.start_server(file_name_initial_video)
+        except Exception as e:
+            log.error(f"{camera_name}: stream server failed to start ({e}) "
+                      f"- camera skipped until the next restart")
+            try:
+                stream_server.close()
+            except Exception:
+                pass
+            return None
         self.stream_servers[camera_name] = stream_server
 
         return stream_server
