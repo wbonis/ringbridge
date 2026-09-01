@@ -435,29 +435,87 @@ class CameraManager:
             log.error(f"{dev.name}: history query failed: {e}")
             return None
 
-        kinds = CONFIG['ring'].get('event_kinds', DEFAULT_EVENT_KINDS)
-        max_seconds = CONFIG['ring'].get('max_clip_seconds', DEFAULT_MAX_CLIP_SECONDS)
-
         for entry in history:
-            recording = entry.get('recording') or {}
-            if recording.get('status') != 'ready':
-                continue
-
-            kind = entry.get('kind')
-            if kind not in kinds:
-                log.debug(f"{dev.name}: skipping {entry.get('id')} (kind={kind})")
-                continue
-
-            duration = entry.get('duration') or 0
-            if max_seconds and duration > max_seconds:
-                log.warning(f"{dev.name}: skipping {entry.get('id')} "
-                            f"(kind={kind}, {duration:.0f}s > {max_seconds}s)")
-                continue
-
-            self._last_entry[dev.name] = entry
-            return entry.get('id')
+            if self._acceptable_entry(dev, entry):
+                self._last_entry[dev.name] = entry
+                return entry.get('id')
 
         return None
+
+    def _acceptable_entry(self, dev, entry) -> bool:
+        """The three filters from _last_ready_recording_id, shared."""
+        recording = entry.get('recording') or {}
+        if recording.get('status') != 'ready':
+            return False
+
+        kinds = CONFIG['ring'].get('event_kinds', DEFAULT_EVENT_KINDS)
+        kind = entry.get('kind')
+        if kind not in kinds:
+            log.debug(f"{dev.name}: skipping {entry.get('id')} (kind={kind})")
+            return False
+
+        max_seconds = CONFIG['ring'].get('max_clip_seconds', DEFAULT_MAX_CLIP_SECONDS)
+        duration = entry.get('duration') or 0
+        if max_seconds and duration > max_seconds:
+            log.warning(f"{dev.name}: skipping {entry.get('id')} "
+                        f"(kind={kind}, {duration:.0f}s > {max_seconds}s)")
+            return False
+
+        return True
+
+    async def _next_ready_recording_id(self, dev, camera_name: str) -> Union[int, None]:
+        """
+        The OLDEST not-yet-handled usable recording - one per poll round.
+
+        Replaces the newest-wins comparison in the motion path: comparing
+        only the newest ready recording against the last handled one loses
+        every recording that finalises in the same poll gap as a newer
+        sibling. Three confirmed losses on 2026-09-01 alone (12:03, 15:51,
+        16:16 local), always when a long clip held up the rounds or two
+        events came back to back. Walking the history back to the last
+        handled id and returning the oldest new entry drains a backlog one
+        clip per round - naturally throttled, and the caller's semantics
+        (one path or None) stay untouched.
+        """
+        last = self.camera_last_record[camera_name]
+        if last is None:
+            # No baseline (never seeded): keep the old behaviour, newest only.
+            return await self._last_ready_recording_id(dev)
+
+        try:
+            history = await dev.async_history(limit=HISTORY_LIMIT)
+        except Exception as e:
+            log.error(f"{dev.name}: history query failed: {e}")
+            return None
+
+        new_entries = []
+        seen_last = False
+        for entry in history:  # newest first
+            if entry.get('id') == last:
+                seen_last = True
+                break
+            if self._acceptable_entry(dev, entry):
+                new_entries.append(entry)
+
+        if not new_entries:
+            return None
+
+        if not seen_last:
+            # The marker aged out of the history window (HISTORY_LIMIT
+            # events have happened since). Delivering the whole window
+            # would be a replay storm - fall back to the newest, as before.
+            log.warning(f"{camera_name}: last handled recording {last} no "
+                        f"longer in the history window - resuming from the "
+                        f"newest, {len(new_entries) - 1} older one(s) skipped")
+            entry = new_entries[0]
+        else:
+            entry = new_entries[-1]
+            if len(new_entries) > 1:
+                log.info(f"{camera_name}: {len(new_entries)} new recordings "
+                         f"pending - delivering the oldest first")
+
+        self._last_entry[dev.name] = entry
+        return entry.get('id')
 
     async def _download(self, dev, recording_id: int, file_name: Path) -> bool:
         """
@@ -940,9 +998,12 @@ class CameraManager:
 
         self._last_history_check[camera_name] = time.time()
 
-        recording_id = await self._last_ready_recording_id(dev)
+        # Oldest new recording, one per round - see _next_ready_recording_id.
+        # The old "newest vs last handled" comparison lost every recording
+        # that finalised in the same poll gap as a newer one.
+        recording_id = await self._next_ready_recording_id(dev, camera_name)
 
-        if recording_id is None or self.camera_last_record[camera_name] == recording_id:
+        if recording_id is None:
             return None
 
         log.debug(f"{camera_name}: new recording {recording_id}")
