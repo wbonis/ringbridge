@@ -58,6 +58,13 @@ HISTORY_LIMIT = 10
 # the history already lists them as "ready" -> retry.
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_RETRY_DELAY = 5
+# A recording that stays "ready" but never yields a URL (seen three times,
+# 2026-08-31 and 2026-09-02, always without a push for it) is retried this
+# many poll rounds (~5 min at the default poll interval) and then written
+# off. Since the oldest-first picker (3f04886) such an entry would
+# otherwise block every newer recording of that camera until it ages out
+# of the history window.
+DOWNLOAD_GIVE_UP_ROUNDS = 10
 
 # Which event kinds are eligible at all. Deliberately NOT "on_demand":
 # those are live-view sessions, i.e. your own access.
@@ -162,6 +169,8 @@ class CameraManager:
         self._last_snapshot = {}
         self._snapshot_task = {}
         self._snapshot_window = {}
+        # Failed download rounds per camera: (recording_id, count).
+        self._download_failures = {}
         # Metadata of the recording last picked up, for the log line.
         self._last_entry = {}
         self._event_summary = {}
@@ -1011,9 +1020,12 @@ class CameraManager:
         file_name = self._clip_path(camera_name)
 
         if not await self._download(dev, recording_id, file_name):
-            # Do not remember it - retry on the next pass.
+            # Retry on the next pass - but not forever: a recording that is
+            # "ready" without a URL blocks the oldest-first queue.
+            self._note_download_failure(camera_name, recording_id)
             return None
 
+        self._download_failures.pop(camera_name, None)
         self.camera_last_record[camera_name] = recording_id
         # Recording is in - close the push window for this camera.
         self._push_at.pop(camera_name, None)
@@ -1031,6 +1043,23 @@ class CameraManager:
             self.frigate.remember(key, values)
 
         return file_name
+
+    def _note_download_failure(self, camera_name: str, recording_id: int) -> None:
+        """
+        Count failed rounds for one recording and write it off after
+        DOWNLOAD_GIVE_UP_ROUNDS by marking it handled. Advancing the marker
+        is enough: the picker walks the history back to it, so everything
+        newer is delivered from the next round on.
+        """
+        last_id, count = self._download_failures.get(camera_name, (None, 0))
+        count = count + 1 if last_id == recording_id else 1
+        self._download_failures[camera_name] = (recording_id, count)
+
+        if count >= DOWNLOAD_GIVE_UP_ROUNDS:
+            log.warning(f"{camera_name}: giving up on recording {recording_id} "
+                        f"- ready but no URL after {count} rounds")
+            self.camera_last_record[camera_name] = recording_id
+            self._download_failures.pop(camera_name, None)
 
     async def start(self) -> None:
         await self._login()
